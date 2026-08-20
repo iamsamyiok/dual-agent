@@ -1,6 +1,6 @@
 // @name skill
-// @desc 技能库：save 沉淀方法论 / list 列出 / get 取全文 / delete 删除（markdown 存于 skills/）
-// @essential true
+// @desc 技能库：save 沉淀方法论 / list 列出 / get 取全文 / delete 删除（markdown 存于 skills/，渐进式加载）
+// @essential false
 const fs = require('fs');
 const path = require('path');
 
