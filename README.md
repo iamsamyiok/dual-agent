@@ -5,27 +5,46 @@
 
 ## 快速开始
 
-**一键启动（推荐）**
+### Windows（一键启动）
 
-```bash
-# Windows：双击 start.bat
-# macOS：双击 start.command
-# Linux / 通用：
-./start.sh
+**方法一：双击启动**
+```
+双击 start.bat → 自动检测 Clash VPN → 启动服务 → 打开浏览器
 ```
 
-启动脚本自动：挑空闲端口（3788-3796）→ 后台起服务 → 就绪后打开浏览器；已在运行时直接复用。
-自定义起始端口：`DUAL_AGENT_PORT=3800 ./start.sh`。要求 Node.js 18+。
+**方法二：演示模式（无需配置 API）**
+```
+双击 demo.bat → 使用模拟 LLM，体验完整功能
+```
 
-**手动启动**
+### Linux / macOS
 
 ```bash
-# 真实模式（需要：内层 OpenAI 兼容 API + 本机 opencode）
+./start.sh        # 正常模式
+DUAL_AGENT_MOCK=1 ./start.sh  # 演示模式
+```
+
+### 手动启动
+
+```bash
+# 正常模式（需要内层 API + opencode）
 node server.js
 
-# 演示模式（无需任何 API，体验完整审批闭环）
+# 演示模式（无需 API）
 DUAL_AGENT_MOCK=1 node server.js
+
+# 指定端口
+DUAL_AGENT_PORT=3800 node server.js
 ```
+
+## 特性
+
+- **Clash VPN 兼容**：自动检测并临时禁用代理，启动后恢复
+- **优雅退出**：关闭浏览器窗口后按 Ctrl+C 即可停止服务
+- **端口自动选择**：3788-3796 自动跳占用的端口
+- **15 个原子级技能**：文件操作、代码生成、任务管理、记忆系统等
+- **AI 修复插件**：点击插件的"AI 修复"按钮，调用外层 OpenCode 自动修复
+- **审批栏**：所有插件修改需人工批准，支持回滚
 
 ## 界面
 

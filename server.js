@@ -413,3 +413,20 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`工作区: ${currentWorkspace()}（${workspaceDir()}）`);
   if (process.env.DUAL_AGENT_MOCK === '1') console.log('演示模式：内层假 LLM + 外层假 opencode（不依赖真实 API）');
 });
+
+// 优雅退出：网页关闭时进程自动退出
+process.on('SIGINT', () => {
+  console.log('\n收到中断信号，正在关闭服务器...');
+  server.close(() => {
+    console.log('服务器已关闭');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n收到终止信号，正在关闭服务器...');
+  server.close(() => {
+    console.log('服务器已关闭');
+    process.exit(0);
+  });
+});
