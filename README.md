@@ -77,7 +77,7 @@ module.exports = {
 ```
 
 - 预装 9 个插件：
-  - 工具类：read / write / edit / bash / fetch（网页抓取转文本）/ search（免 key 多引擎搜索：Serper → Bing → DuckDuckGo 降级链）
+  - 工具类：read / write（覆盖走原子写、append 带重试幂等保护、智能区分续写误用与整体重构）/ edit / bash / fetch（网页抓取转文本）/ search（免 key 多引擎搜索：Serper → Bing → DuckDuckGo 降级链）
   - 记忆类：memory（跨会话持久记忆，存工作区 `.memory-short.json` / `.memory-long.json`，单调递增 id）
   - 技能类：skill（任务方法论沉淀，markdown 存工作区 `skills/`）
   - 任务类：todo（跨轮任务清单，存工作区 `.todo.json`）
@@ -91,7 +91,7 @@ module.exports = {
 - 外层系统提示词软约束：仅修改插件目录、不碰核心 runtime、修改必须等用户批准
 - 静态预检（应用前）：语法错误直接拒绝（vm 编译检查）；危险模式（子进程/网络监听/进程终止/递归删除等）转为审批栏黄色警告，用户知情后可批
 - 快照仅保留最近 2 个版本（`.data/snapshots/`），所有操作记审计日志（`.data/audit.json`，环形 500 条）
-- 内外层上下文隔离：仅内层日志与插件状态单向同步给外层
+- 内外层上下文隔离：仅内层日志与插件状态单向同步给外层；失败日志带较完整错误原文（成功条目压缩），首次评审自动附带全部插件源码（续聊时外层可用文件工具自行读取 `plugins/`），并附最近审批栏决定避免重复提议
 - 审批队列持久化：重启后待审批项不丢；内层会话历史也持久化（最近 60 条）
 
 ## 多工作区
@@ -102,7 +102,7 @@ module.exports = {
 
 ```bash
 node test/smoke.js
-# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（47 项断言）
+# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（50 项断言）
 ```
 
 ## 环境变量

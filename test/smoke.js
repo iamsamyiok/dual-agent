@@ -68,6 +68,29 @@ async function main() {
   await t('parseProposals：非法 action 被忽略', () => {
     assert.equal(outerMod.parseProposals('```json\n{"proposals":[{"action":"rm","plugin":"x"}]}\n```').length, 0);
   });
+  await t('parseProposals：code 内嵌 ``` 时围栏容错（逐级扩展闭合点）', () => {
+    const code = '// @name demo\n// 教学示例嵌套围栏 ```js\n// const x = 1;\n// ```\nmodule.exports = { run: async () => "ok" };';
+    const text = '说明文字\n```json\n{"proposals":[{"action":"create","plugin":"demo","code":' + JSON.stringify(code) + ',"reason":"r"}]}\n```\n结尾';
+    const ps = outerMod.parseProposals(text);
+    assert.equal(ps.length, 1, JSON.stringify(ps));
+    assert.equal(ps[0].plugin, 'demo');
+    assert.ok(ps[0].code.includes('```js') && ps[0].code.includes('module.exports'), 'code 应完整含嵌套围栏');
+  });
+  await t('buildContext：首评带源码、失败日志放宽、审批历史附带', () => {
+    const ctxText = outerMod.buildContext(
+      [{ name: 'bash', essential: true, status: 'loaded', desc: '执行命令' }],
+      [
+        { ts: Date.now(), plugin: 'write', args: {}, ok: false, result: 'E'.repeat(800), ms: 5 },
+        { ts: Date.now(), plugin: 'read', args: {}, ok: true, result: 'S'.repeat(300), ms: 3 }
+      ],
+      { codes: new Map([['bash', '// bash code body']]), audit: ['- [2026-08-20 12:00] 已批准 update bash'] }
+    );
+    assert.ok(ctxText.includes('// bash code body'), '应包含源码全文');
+    assert.ok(ctxText.includes('E'.repeat(600)), '失败条目应放宽到 600');
+    assert.ok(!ctxText.includes('S'.repeat(90)), '成功条目应压缩到 80');
+    assert.ok(ctxText.includes('已批准 update bash'), '应附审批历史');
+    assert.ok(ctxText.includes('plugins/bash.js'), '清单应带文件路径');
+  });
 
   const plugins = require(path.join(ROOT, 'lib', 'plugins'));
   await t('NAME_RE 拒绝路径穿越', () => {
@@ -221,17 +244,37 @@ async function main() {
     const readBack = await plugins.runPlugin('read', { path: 'long-doc.md' }, ctx);
     assert.ok(readBack.includes('AAABBB'), readBack);
   });
-  await t('write 覆盖保护：大文件覆盖需 confirm，append 不受限', async () => {
-    const big = 'X'.repeat(300);
-    await plugins.runPlugin('write', { path: 'protect.md', content: big }, ctx);
-    const w1 = await plugins.runPlugin('write', { path: 'protect.md', content: 'short' }, ctx); // 小内容覆盖大文件 → 拒绝
+  await t('write 覆盖保护：高相似续写拦截、低相似重构放行', async () => {
+    const base = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu one two three four five six seven eight';
+    await plugins.runPlugin('write', { path: 'protect.md', content: base }, ctx);
+    // 高相似（原文+续写尾巴）→ 判定续写场景，无 confirm 拒绝
+    const w1 = await plugins.runPlugin('write', { path: 'protect.md', content: base + ' extra tail words here' }, ctx);
     assert.ok(/^插件 write 执行出错/.test(w1) && w1.includes('append=true') && w1.includes('confirm=true'), w1);
-    const w2 = await plugins.runPlugin('write', { path: 'protect.md', content: 'new-full' + big, confirm: true }, ctx); // 确认后允许
-    assert.ok(w2.includes('已覆盖'), w2);
-    const w3 = await plugins.runPlugin('write', { path: 'protect.md', content: '+tail', append: true }, ctx); // append 畅通
-    assert.ok(w3.includes('已追加'), w3);
-    const w4 = await plugins.runPlugin('write', { path: 'small.md', content: '首次小文件' }, ctx); // 覆盖/写入小文件（<200 字符）不受限
+    // 低相似（截然不同内容）→ 判定整体重构，自动放行（旧版会误拦）
+    const w2 = await plugins.runPlugin('write', { path: 'protect.md', content: 'red orange yellow green blue indigo violet purple pink brown black white gray silver gold copper iron zinc tin lead mercury neon argon krypton xenon' }, ctx);
+    assert.ok(w2.includes('已重写') && w2.includes('重构'), w2);
+    // 重构后文件变短（148<200），先恢复长文件再测 confirm 强覆盖
+    await plugins.runPlugin('write', { path: 'protect.md', content: base }, ctx);
+    const w3 = await plugins.runPlugin('write', { path: 'protect.md', content: base + ' extra tail words here', confirm: true }, ctx);
+    assert.ok(w3.includes('已覆盖'), w3);
+    // 小文件（<200 字符）不受限
+    const w4 = await plugins.runPlugin('write', { path: 'small.md', content: '首次小文件' }, ctx);
     assert.ok(w4.includes('已写入'), w4);
+    // 原子写入不残留临时文件
+    assert.equal(fs.readdirSync(WS).filter(f => f.includes('.tmp-')).length, 0, '不应残留 .tmp- 临时文件');
+  });
+  await t('write append 幂等：重试重复段自动跳过', async () => {
+    const seg = 'S'.repeat(60) + '-segment-content-marker'; // ≥40 字符才启用幂等
+    await plugins.runPlugin('write', { path: 'idem.md', content: seg, append: true }, ctx);
+    const again = await plugins.runPlugin('write', { path: 'idem.md', content: seg, append: true }, ctx);
+    assert.ok(again.includes('幂等保护'), again);
+    const back = await plugins.runPlugin('read', { path: 'idem.md' }, ctx);
+    assert.ok(back.includes(seg) && back.indexOf(seg) === back.lastIndexOf(seg), '重复段不应被二次写入');
+    const next = await plugins.runPlugin('write', { path: 'idem.md', content: 'T'.repeat(60) + '-next-segment', append: true }, ctx); // 不同内容正常追加
+    assert.ok(next.includes('已追加'), next);
+    const short = await plugins.runPlugin('write', { path: 'idem2.md', content: 'ab', append: true }, ctx); // 短内容（<40）重复是正常需求
+    const short2 = await plugins.runPlugin('write', { path: 'idem2.md', content: 'ab', append: true }, ctx);
+    assert.ok(short.includes('已追加') && short2.includes('已追加'), short2);
   });
   await t('read tail/offset：读末尾与分段（不回传全文）', async () => {
     await plugins.runPlugin('write', { path: 'big.txt', content: 'x'.repeat(5000) + 'TAIL_MARKER' }, ctx);

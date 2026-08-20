@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.6.0';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -157,6 +157,16 @@ function persistInnerMessages() {
 }
 function clearInnerMessages() { innerMessages.length = 0; persistInnerMessages(); }
 loadInnerMessages();
+
+// ---------- 审批历史摘要（外层上下文用：最近 n 条批准/拒绝决定） ----------
+function recentAuditLines(n) {
+  let list = [];
+  try { list = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'audit.json'), 'utf8')); } catch { return []; }
+  return list
+    .filter(e => e.op === 'apply' || e.op === 'reject')
+    .slice(-n)
+    .map(e => `- [${String(e.ts).slice(0, 16)}] ${e.op === 'apply' ? '已批准' : '已拒绝'} ${e.action} ${e.plugin}${e.reason ? `（理由：${String(e.reason).slice(0, 120)}）` : ''}`);
+}
 
 // ---------- HTTP 基础 ----------
 function json(res, code, data) {
@@ -447,8 +457,15 @@ const server = http.createServer(async (req, res) => {
       const sessionId = cfg.outerSession || '';
       const send = sse(req, res);
       send({ type: 'start' });
-      // 单向上下文：软约束提示词 + 插件清单 + 内层日志（不含内层对话原文）
-      const prompt = `${outerMod.SYSTEM_PROMPT}\n\n${outerMod.buildContext(plugins.listPlugins(), getInnerLog())}\n\n== 用户指令 ==\n${message}`;
+      // 单向上下文：软约束提示词 + 插件清单（首评附全量源码）+ 审批历史 + 内层日志（失败详/成功简）
+      const ctxOpts = { audit: recentAuditLines(5) };
+      if (!sessionId) {
+        // 首次评审（无续聊会话）：全量附带插件源码，杜绝外层"凭描述盲写"
+        const codes = new Map();
+        for (const pl of plugins.listPlugins()) codes.set(pl.name, plugins.readCode(pl.name));
+        ctxOpts.codes = codes;
+      }
+      const prompt = `${outerMod.SYSTEM_PROMPT}\n\n${outerMod.buildContext(plugins.listPlugins(), getInnerLog(), ctxOpts)}\n\n== 用户指令 ==\n${message}`;
       let fullText = '';
       try {
         const r = await outerMod.runOuter(runner, prompt, ROOT, ev => {
@@ -468,6 +485,9 @@ const server = http.createServer(async (req, res) => {
           const r2 = approval.addProposal(pr, 'outer');
           if (r2.ok) added.push(r2.proposal.id);
           else send({ type: 'notice', content: `建议无效已忽略：${r2.error}` });
+        }
+        if (!props.length && /```/.test(fullText)) {
+          send({ type: 'notice', content: '外层回复含代码块但未解析出任何建议（JSON 格式不合规范）。请在右栏要求其按标准 ```json proposals 格式重发。' });
         }
         send({ type: 'proposals', added, count: added.length });
         send({ type: 'done' });
@@ -524,8 +544,7 @@ const server = http.createServer(async (req, res) => {
       try { list = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'audit.json'), 'utf8')); } catch { /* ignore */ }
       json(res, 200, { success: true, audit: list.slice(-100).reverse() });
       return;
-    }
-    if (p === '/api/inner-log' && req.method === 'GET') {
+    }    if (p === '/api/inner-log' && req.method === 'GET') {
       json(res, 200, { success: true, log: getInnerLog().slice(-50).reverse() });
       return;
     }

@@ -1,8 +1,27 @@
 // @name write
-// @desc 写入文本文件（自动创建父目录；默认覆盖，append=true 追加到末尾——长文分段写入用）
+// @desc 写入文本文件（自动建父目录；覆盖走原子写；append 追加带重试幂等保护；智能区分「续写误用覆盖」与「整体重构」）
 // @essential true
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+
+// 粗相似度：词集重叠率（0~1）。用于区分「重构」（内容截然不同）与「续写误用覆盖」（高度重叠）
+function similarity(a, b) {
+  const tok = s => new Set(String(s).toLowerCase().split(/[\s,;:!?，。；：！？"'`()\[\]{}<>]+/).filter(w => w.length > 1));
+  const A = tok(a), B = tok(b);
+  if (!A.size || !B.size) return a === b ? 1 : 0;
+  let hit = 0;
+  for (const w of A) if (B.has(w)) hit++;
+  return hit / Math.min(A.size, B.size);
+}
+
+// 原子覆盖：先写同目录临时文件再 rename，写一半崩溃/断电不会损坏原文件
+function atomicWrite(fp, body) {
+  const tmp = path.join(path.dirname(fp), `.${path.basename(fp)}.tmp-${process.pid}-${crypto.randomBytes(3).toString('hex')}`);
+  fs.writeFileSync(tmp, body, 'utf8');
+  fs.renameSync(tmp, fp);
+}
 
 module.exports = {
   params: {
@@ -11,7 +30,7 @@ module.exports = {
       path: { type: 'string', description: '文件路径（相对工作目录或绝对路径）' },
       content: { type: 'string', description: '要写入的内容（append 模式下为要追加的片段）' },
       append: { type: 'boolean', description: 'true 时追加到文件末尾（文件不存在则创建），长文分段写入必须用此模式' },
-      confirm: { type: 'boolean', description: '覆盖已有大段内容（≥200 字符）时的二次确认，传 true 才允许整体覆盖' }
+      confirm: { type: 'boolean', description: '强警告覆盖的二次确认，true 才允许整体覆盖（完全重构成不同内容时会被自动放行，无需 confirm）' }
     },
     required: ['path', 'content']
   },
@@ -23,7 +42,21 @@ module.exports = {
     }
     const body = String(args.content ?? '');
     fs.mkdirSync(path.dirname(fp), { recursive: true });
+
     if (args.append === true) {
+      // ---- 追加模式：带重试幂等保护 ----
+      // 场景：参数传输失败后模型重试，但上一段其实已写入成功 → 原样再发同一段。
+      // 无保护会静默重复，文件出现两份相同段落。检测：内容已完整存在于文件尾部 → 跳过。
+      if (fs.existsSync(fp)) {
+        const old = fs.readFileSync(fp, 'utf8');
+        if (body.length >= 40 && old.length >= body.length) {
+          const tailWin = old.slice(-body.length * 3); // 尾部窗口足够覆盖一次重复
+          if (tailWin.includes(body)) {
+            const tail = body.length > 120 ? '…' + body.slice(-120) : body;
+            return `幂等保护：此段已存在于 ${fp} 末尾（上次调用实际已成功，属重试重复），本次未重复追加。文件现共 ${Buffer.byteLength(old, 'utf8')} 字节。该段末尾：${JSON.stringify(tail)}`;
+          }
+        }
+      }
       const existed = fs.existsSync(fp);
       fs.appendFileSync(fp, body, 'utf8');
       const total = fs.statSync(fp).size;
@@ -31,20 +64,28 @@ module.exports = {
       const tail = body.length > 120 ? '…' + body.slice(-120) : body;
       return `已追加 ${body.length} 字符到 ${fp}${existed ? '' : '（新建）'}，文件现共 ${total} 字节。本次追加末尾：${JSON.stringify(tail)}`;
     }
-    // 覆盖保护：目标已有实质内容且与本次不同时强警告（实测模型会忘记 append 语义导致前文静默丢失）
+
+    // ---- 覆盖模式：智能区分「续写误用」与「整体重构」 ----
     if (fs.existsSync(fp)) {
       const old = fs.readFileSync(fp, 'utf8');
       if (old.length >= 200 && old !== body) {
-        if (!args.confirm) {
-          throw new Error(`拒绝覆盖：${fp} 已有 ${old.length} 字符内容，普通 write 会整体覆盖。` +
-            `续写请用 append=true 重发本次内容（content 无需改动，加上 path 和 append:true 即可）；` +
-            `确实要整体替换文件才加 confirm=true。`);
+        const sim = similarity(old, body);
+        if (sim >= 0.3) {
+          // 高度重叠却要整体覆盖 = 典型的「忘记 append 语义」，前文会被静默清掉 → 强拦
+          if (!args.confirm) {
+            throw new Error(`拒绝覆盖：${fp} 已有 ${old.length} 字符，与本次内容重叠度 ${(sim * 100).toFixed(0)}%（判定为续写场景）。` +
+              `续写请用 append=true 重发本次内容（content 无需改动，加上 append:true 即可）；` +
+              `确实要整体替换文件才加 confirm=true。`);
+          }
+          atomicWrite(fp, body);
+          return `已覆盖 ${fp}（原 ${old.length} 字符 → 新 ${body.length} 字符，confirm=true 已确认，原子写入）`;
         }
-        fs.writeFileSync(fp, body, 'utf8');
-        return `已覆盖 ${fp}（原 ${old.length} 字符 → 新 ${body.length} 字符，confirm=true 已确认）`;
+        // 重叠度低 = 模型有意重构成不同内容 → 自动放行，不卡流程
+        atomicWrite(fp, body);
+        return `已重写 ${fp}（原 ${old.length} 字符 → 新 ${body.length} 字符，重叠度 ${(sim * 100).toFixed(0)}% 判定为整体重构，自动放行，原子写入）`;
       }
     }
-    fs.writeFileSync(fp, body, 'utf8');
+    atomicWrite(fp, body);
     return `已写入 ${fp}（${body.length} 字符）`;
   }
 };
