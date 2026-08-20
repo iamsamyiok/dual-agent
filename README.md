@@ -1,6 +1,6 @@
 # 双层 Agent 自迭代系统（dual-agent-loop）
 
-轻量 demo：内层 Agent（OpenAI 兼容 API + 插件执行）+ 外层 Agent（本机 opencode CLI）自闭环。
+轻量演示：内层 Agent（OpenAI 兼容 API + 插件执行）+ 外层 Agent（本机 opencode CLI）自闭环。
 外层根据内层日志与插件状态提出插件增删改建议，经底部审批栏批准后自动快照、应用、热加载。
 
 ## 快速开始
