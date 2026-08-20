@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>双层 Agent 自迭代系统</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { font: 13px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; color: #333; background: #f5f6f8; }
+  #app { height: 100%; display: flex; flex-direction: column; }
+
+  /* 顶栏 */
+  header { height: 46px; background: #1e293b; color: #fff; display: flex; align-items: center; padding: 0 14px; gap: 10px; flex-shrink: 0; }
+  header .logo { font-weight: 700; font-size: 14px; }
+  header .sub { font-size: 11px; color: #94a3b8; }
+  header .grow { flex: 1; }
+  .hd-tag { font-size: 11px; border: 1px solid #475569; border-radius: 10px; padding: 2px 8px; color: #cbd5e1; }
+  .hd-tag.ok { border-color: #10b981; color: #6ee7b7; }
+  .hd-tag.bad { border-color: #ef4444; color: #fca5a5; }
+  .hd-btn { background: #334155; color: #e2e8f0; border: none; border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 12px; }
+  .hd-btn:hover { background: #475569; }
+
+  /* 三栏主体 */
+  main { flex: 1; min-height: 0; display: flex; }
+  .col { display: flex; flex-direction: column; min-width: 0; background: #fff; }
+  .col-head { height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid #e5e7eb; flex-shrink: 0; font-weight: 600; font-size: 13px; }
+  .col-head .hint { font-weight: 400; font-size: 11px; color: #9ca3af; }
+  #pluginCol { width: 270px; flex-shrink: 0; border-right: 1px solid #e5e7eb; }
+  #innerCol { flex: 1.2; border-right: 1px solid #e5e7eb; }
+  #outerCol { flex: 1; }
+
+  /* 左栏：插件 */
+  #pluginList { flex: 1; overflow-y: auto; padding: 8px; }
+  .pl-group { font-size: 11px; color: #9ca3af; padding: 8px 6px 4px; }
+  .pl-card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; cursor: pointer; }
+  .pl-card:hover { border-color: #93c5fd; background: #f8fafc; }
+  .pl-card.broken { border-color: #fca5a5; background: #fef2f2; }
+  .pl-top { display: flex; align-items: center; gap: 6px; }
+  .pl-name { font-weight: 600; font-family: Consolas, monospace; }
+  .pl-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .pl-dot.loaded { background: #10b981; }
+  .pl-dot.lazy { background: #f59e0b; }
+  .pl-dot.broken { background: #ef4444; }
+  .pl-badge { font-size: 10px; border-radius: 4px; padding: 1px 5px; background: #eff6ff; color: #3b82f6; }
+  .pl-badge.biz { background: #f0fdf4; color: #16a34a; }
+  .pl-badge.bad { background: #fef2f2; color: #ef4444; }
+  .pl-desc { font-size: 11.5px; color: #6b7280; margin-top: 3px; white-space: normal; }
+  .pl-ops { margin-top: 6px; display: flex; gap: 6px; }
+  .mini-btn { font-size: 11px; border: 1px solid #d1d5db; background: #fff; border-radius: 5px; padding: 2px 8px; cursor: pointer; color: #4b5563; }
+  .mini-btn:hover { border-color: #3b82f6; color: #3b82f6; }
+  .mini-btn.danger:hover { border-color: #ef4444; color: #ef4444; }
+  #addPluginBtn { margin: 8px; }
+
+  /* 中/右栏：对话 */
+  .chat-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 92%; border-radius: 10px; padding: 8px 12px; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; }
+  .msg.user { align-self: flex-end; background: #3b82f6; color: #fff; }
+  .msg.assistant { align-self: flex-start; background: #f3f4f6; border: 1px solid #e5e7eb; }
+  .msg.error { align-self: stretch; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; max-width: 100%; }
+  .msg .who { font-size: 10.5px; color: #9ca3af; margin-bottom: 3px; }
+  .msg.user .who { color: #bfdbfe; }
+  .toolcard { align-self: stretch; max-width: 100%; border: 1px dashed #c7d2fe; background: #f8faff; border-radius: 8px; padding: 6px 10px; font-size: 11.5px; }
+  .toolcard .tc-head { color: #4338ca; font-family: Consolas, monospace; }
+  .toolcard .tc-args { color: #6b7280; font-family: Consolas, monospace; margin-top: 2px; word-break: break-all; }
+  .toolcard .tc-res { color: #374151; margin-top: 4px; white-space: pre-wrap; max-height: 120px; overflow-y: auto; font-size: 11px; }
+  .toolcard.fail { border-color: #fecaca; background: #fef8f8; }
+  .toolcard.fail .tc-head { color: #b91c1c; }
+  .composer { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #e5e7eb; flex-shrink: 0; }
+  .composer input { flex: 1; border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; outline: none; }
+  .composer input:focus { border-color: #3b82f6; }
+  .composer input:disabled { background: #f3f4f6; color: #9ca3af; }
+  .composer button { background: #3b82f6; color: #fff; border: none; border-radius: 8px; padding: 0 16px; cursor: pointer; font-size: 12.5px; }
+  .composer button:disabled { background: #93c5fd; cursor: not-allowed; }
+  .busy-tip { font-size: 11px; color: #f59e0b; padding: 0 12px 6px; display: none; }
+
+  /* 右栏建议卡片 */
+  .prop-card { align-self: stretch; max-width: 100%; border: 1px solid #fcd34d; background: #fffbeb; border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+  .prop-card .pc-head { font-weight: 600; color: #92400e; }
+  .prop-card .pc-reason { color: #78350f; margin-top: 4px; }
+  .prop-card pre { background: #fff; border: 1px solid #fde68a; border-radius: 6px; padding: 6px; margin-top: 6px; max-height: 140px; overflow: auto; font-size: 11px; }
+
+  /* 底部审批栏 */
+  #approvalBar { flex-shrink: 0; border-top: 2px solid #f59e0b; background: #fffbeb; }
+  #approvalBar .ab-closed { height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 14px; cursor: pointer; }
+  #approvalBar .ab-count { background: #f59e0b; color: #fff; border-radius: 10px; font-size: 11px; padding: 1px 8px; }
+  #approvalBar .ab-title { font-weight: 600; color: #92400e; font-size: 12.5px; }
+  #approvalBar .ab-empty { color: #b45309; font-size: 11.5px; }
+  #approvalBar .grow { flex: 1; }
+  .ab-btn { font-size: 12px; border: 1px solid #d97706; background: #fff; color: #92400e; border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+  .ab-btn:hover { background: #fef3c7; }
+  #approvalPanel { display: none; max-height: 260px; overflow-y: auto; padding: 10px 14px; border-top: 1px solid #fde68a; }
+  #approvalPanel.open { display: block; }
+  .ap-item { background: #fff; border: 1px solid #fde68a; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+  .ap-head { display: flex; align-items: center; gap: 8px; }
+  .ap-action { font-size: 11px; border-radius: 4px; padding: 1px 6px; font-weight: 600; }
+  .ap-action.create { background: #dcfce7; color: #15803d; }
+  .ap-action.update { background: #dbeafe; color: #1d4ed8; }
+  .ap-action.delete { background: #fee2e2; color: #b91c1c; }
+  .ap-plugin { font-family: Consolas, monospace; font-weight: 700; }
+  .ap-src { font-size: 10.5px; color: #9ca3af; }
+  .ap-reason { color: #57534e; margin: 6px 0; font-size: 12px; }
+  .ap-ops { display: flex; gap: 8px; margin-top: 8px; }
+  .btn-ok { background: #16a34a; color: #fff; border: none; border-radius: 6px; padding: 4px 14px; cursor: pointer; font-size: 12px; }
+  .btn-no { background: #fff; color: #b91c1c; border: 1px solid #fca5a5; border-radius: 6px; padding: 4px 14px; cursor: pointer; font-size: 12px; }
+  .btn-ok:hover { background: #15803d; }
+  .diff-box { border: 1px solid #e5e7eb; border-radius: 6px; margin-top: 6px; max-height: 200px; overflow: auto; font: 11px/1.5 Consolas, monospace; background: #fafafa; }
+  .diff-box .d-del { background: #fee2e2; color: #7f1d1d; display: block; padding: 0 6px; white-space: pre-wrap; }
+  .diff-box .d-add { background: #dcfce7; color: #14532d; display: block; padding: 0 6px; white-space: pre-wrap; }
+  .diff-box .d-keep { display: block; padding: 0 6px; color: #6b7280; white-space: pre-wrap; }
+
+  /* 弹窗 */
+  .mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; z-index: 50; }
+  .mask.show { display: flex; }
+  .modal { background: #fff; border-radius: 12px; width: min(640px, 92vw); max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; }
+  .modal h3 { padding: 14px 18px; border-bottom: 1px solid #e5e7eb; font-size: 14px; }
+  .modal .m-body { padding: 16px 18px; overflow-y: auto; }
+  .modal .m-foot { padding: 12px 18px; border-top: 1px solid #e5e7eb; display: flex; justify-content: flex-end; gap: 10px; }
+  .frm label { display: block; font-size: 12px; color: #4b5563; margin: 10px 0 4px; }
+  .frm input { width: 100%; border: 1px solid #d1d5db; border-radius: 6px; padding: 7px 10px; font-size: 12.5px; outline: none; }
+  .frm input:focus { border-color: #3b82f6; }
+  .frm textarea { width: 100%; height: 320px; border: 1px solid #d1d5db; border-radius: 6px; padding: 8px 10px; font: 12px/1.6 Consolas, monospace; outline: none; }
+  #toast { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); background: #1e293b; color: #fff; border-radius: 8px; padding: 8px 18px; font-size: 12.5px; display: none; z-index: 99; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span class="logo">双层 Agent 自迭代系统</span>
+    <span class="sub">内层执行 + 外层迭代插件</span>
+    <span class="hd-tag" id="tagInner">内层：未配置</span>
+    <span class="hd-tag" id="tagOc">OpenCode：检测中…</span>
+    <span class="grow"></span>
+    <button class="hd-btn" onclick="openConfig()">配置</button>
+    <button class="hd-btn" onclick="loadAudit()">审计日志</button>
+  </header>
+
+  <main>
+    <!-- 左：插件管理 -->
+    <section class="col" id="pluginCol">
+      <div class="col-head">插件管理 <span class="hint">手动增删改（自动快照可回滚）</span></div>
+      <div id="pluginList"></div>
+      <button class="mini-btn" id="addPluginBtn" onclick="openPluginEditor('')">＋ 新建插件</button>
+    </section>
+
+    <!-- 中：内层对话 -->
+    <section class="col" id="innerCol">
+      <div class="col-head">内层 Agent <span class="hint" id="innerModelTag"></span></div>
+      <div class="chat-body" id="innerMsgs">
+        <div class="msg assistant">我是内层 Agent，通过插件（read / write / edit / bash 及业务插件）完成任务。执行过程中的每次插件调用都会记录日志，供外层观察。</div>
+      </div>
+      <div class="busy-tip" id="innerBusy">执行中… 插件调用与思考过程实时展示</div>
+      <div class="composer">
+        <input id="innerInput" placeholder="给内层下任务（执行中输入锁定）" autocomplete="off">
+        <button id="innerSendBtn" onclick="innerSend()">发送</button>
+      </div>
+    </section>
+
+    <!-- 右：外层对话 -->
+    <section class="col" id="outerCol">
+      <div class="col-head">外层 OpenCode <span class="hint">自动携带内层日志+插件状态，仅输出插件修改建议</span></div>
+      <div class="chat-body" id="outerMsgs">
+        <div class="msg assistant">我是外层迭代 Agent（opencode）。我会观察内层日志与插件状态，提出插件增删改建议——所有建议需你在底部审批栏批准后才会生效。</div>
+      </div>
+      <div class="busy-tip" id="outerBusy">分析中…</div>
+      <div class="composer">
+        <input id="outerInput" placeholder="让外层分析内层运行并提出插件改进建议" autocomplete="off">
+        <button id="outerSendBtn" onclick="outerSend()">发送</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- 底部：统一审批栏 -->
+  <div id="approvalBar">
+    <div class="ab-closed" onclick="toggleApprovalPanel()">
+      <span class="ab-count" id="abCount">0</span>
+      <span class="ab-title">待审批</span>
+      <span class="ab-empty" id="abEmpty">暂无待审批的修改建议（外层建议或历史详情会出现在这里）</span>
+      <span class="grow"></span>
+      <button class="ab-btn" onclick="event.stopPropagation();doRollback()">↩ 回滚最近修改</button>
+    </div>
+    <div id="approvalPanel"></div>
+  </div>
+</div>
+
+<!-- 配置弹窗 -->
+<div class="mask" id="configMask">
+  <div class="modal">
+    <h3>内层 LLM 配置（OpenAI 兼容 API）</h3>
+    <div class="m-body frm">
+      <label>Base URL（如 https://api.siliconflow.cn/v1）</label>
+      <input id="cfgBase" placeholder="https://.../v1">
+      <label>API Key（仅保存在本机 .data/config.json）</label>
+      <input id="cfgKey" type="password" placeholder="sk-...">
+      <label>模型名（如 Qwen/Qwen3-8B）</label>
+      <input id="cfgModel" placeholder="provider/model">
+    </div>
+    <div class="m-foot">
+      <button class="btn-no" onclick="closeConfig()">取消</button>
+      <button class="btn-ok" onclick="saveConfigUi()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 插件编辑弹窗 -->
+<div class="mask" id="pluginMask">
+  <div class="modal">
+    <h3 id="peTitle">新建插件</h3>
+    <div class="m-body frm">
+      <label>插件名（小写字母/数字/连字符）</label>
+      <input id="peName" placeholder="如 fetch">
+      <label>插件代码（注释头提供元信息，模板已预填）</label>
+      <textarea id="peCode" spellcheck="false"></textarea>
+    </div>
+    <div class="m-foot">
+      <button class="btn-no" onclick="closePluginEditor()">取消</button>
+      <button class="btn-ok" onclick="savePluginUi()">保存（自动快照+热加载）</button>
+    </div>
+  </div>
+</div>
+
+<!-- 审计弹窗 -->
+<div class="mask" id="auditMask">
+  <div class="modal">
+    <h3>审计日志（最近 100 条）</h3>
+    <div class="m-body"><div id="auditList" style="font:11.5px/1.9 Consolas,monospace"></div></div>
+    <div class="m-foot"><button class="btn-ok" onclick="document.getElementById('auditMask').classList.remove('show')">关闭</button></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ==================== 基础 ====================
+const PAGE_VERSION = '0.1.0';
+const $ = id => document.getElementById(id);
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
+function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({ success: false, error: 'HTTP ' + r.status }));
+  if (!j.success && j.error) toast(j.error);
+  return j;
+}
+async function streamSSE(path, body, onEvent) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) { const j = await r.json().catch(() => ({ error: 'HTTP ' + r.status })); throw new Error(j.error || 'HTTP ' + r.status); }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const line = chunk.split('\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
+      try { onEvent(JSON.parse(line.slice(6))); } catch { /* ignore */ }
+    }
+  }
+}
+
+// ==================== 健康状态 ====================
+async function loadHealth() {
+  const h = await api('/api/health');
+  const ti = $('tagInner'), to = $('tagOc');
+  if (h.mock) { ti.textContent = '内层：演示模式'; ti.className = 'hd-tag ok'; to.textContent = '外层：演示模式'; to.className = 'hd-tag ok'; $('innerModelTag').textContent = 'DUAL_AGENT_MOCK=1'; }
+  else {
+    ti.textContent = h.innerConfigured ? '内层：已配置' : '内层：未配置'; ti.className = 'hd-tag' + (h.innerConfigured ? ' ok' : ' bad');
+    to.textContent = h.opencode ? 'OpenCode：就绪' : 'OpenCode：未安装'; to.className = 'hd-tag' + (h.opencode ? ' ok' : ' bad');
+    if (!h.innerConfigured) toast('内层 API 未配置，点右上角「配置」填写');
+  }
+}
+
+// ==================== 插件管理（左栏） ====================
+let pluginData = [];
+async function loadPlugins() {
+  const d = await api('/api/plugins');
+  if (!d.success) return;
+  pluginData = d.plugins || [];
+  renderPlugins();
+}
+function renderPlugins() {
+  const el = $('pluginList');
+  const groups = [
+    { label: '基础插件（启动即加载）', test: p => p.essential },
+    { label: '业务插件（首次调用时加载）', test: p => !p.essential }
+  ];
+  let html = '';
+  for (const g of groups) {
+    const list = pluginData.filter(g.test);
+    if (!list.length) continue;
+    html += `<div class="pl-group">${g.label}（${list.length}）</div>`;
+    html += list.map(p => `
+      <div class="pl-card ${p.status === 'broken' ? 'broken' : ''}">
+        <div class="pl-top">
+          <span class="pl-dot ${p.status}"></span>
+          <span class="pl-name">${esc(p.name)}</span>
+          <span class="pl-badge ${p.essential ? '' : 'biz'}">${p.essential ? '基础' : '业务'}</span>
+          ${p.status === 'broken' ? '<span class="pl-badge bad">损坏</span>' : (p.status === 'lazy' ? '<span class="pl-badge">懒加载</span>' : '')}
+        </div>
+        <div class="pl-desc">${esc(p.desc || '（无描述）')}${p.err ? `<br>⚠ ${esc(p.err)}` : ''}</div>
+        <div class="pl-ops">
+          <button class="mini-btn" onclick="openPluginEditor('${esc(p.name)}')">编辑</button>
+          <button class="mini-btn danger" onclick="delPlugin('${esc(p.name)}')">删除</button>
+        </div>
+      </div>`).join('');
+  }
+  el.innerHTML = html || '<div class="pl-group">（无插件）</div>';
+}
+const PLUGIN_TEMPLATE = [
+  '// @name my-plugin',
+  '// @desc 一句话描述插件功能',
+  '// @essential false',
+  '',
+  'module.exports = {',
+  '  params: {',
+  '    type: "object",',
+  '    properties: {',
+  '      input: { type: "string", description: "参数说明" }',
+  '    },',
+  '    required: ["input"]',
+  '  },',
+  '  run: async (args, ctx) => {',
+  '    return "结果：" + args.input;',
+  '  }',
+  '};',
+  ''
+].join('\n');
+function openPluginEditor(name) {
+  const p = name ? pluginData.find(x => x.name === name) : null;
+  $('peTitle').textContent = p ? `编辑插件：${name}` : '新建插件';
+  $('peName').value = p ? p.name : '';
+  $('peName').disabled = !!p;
+  $('peCode').value = p ? p.code : PLUGIN_TEMPLATE;
+  $('pluginMask').classList.add('show');
+}
+function closePluginEditor() { $('pluginMask').classList.remove('show'); }
+async function savePluginUi() {
+  const name = $('peName').value.trim();
+  const code = $('peCode').value;
+  if (!name) { toast('请填写插件名'); return; }
+  const d = await api('/api/plugins/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, code }) });
+  if (d.success) { pluginData = d.plugins; renderPlugins(); closePluginEditor(); toast('已保存（快照+热加载完成）'); }
+}
+async function delPlugin(name) {
+  if (!confirm(`删除插件 ${name}？（自动快照，可在审批栏回滚）`)) return;
+  const d = await api('/api/plugins/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+  if (d.success) { pluginData = d.plugins; renderPlugins(); toast('已删除'); }
+}
+
+// ==================== 内层对话（中栏） ====================
+let innerBusy = false;
+async function innerSend() {
+  if (innerBusy) return;
+  const input = $('innerInput');
+  const text = input.value.trim();
+  if (!text) return;
+  innerBusy = true;
+  input.disabled = true; $('innerSendBtn').disabled = true;
+  $('innerBusy').style.display = 'block';
+  input.value = '';
+  appendMsg('innerMsgs', 'user', text, '我');
+  const ai = appendMsg('innerMsgs', 'assistant', '', '内层 Agent');
+  let cur = ai;
+  try {
+    await streamSSE('/api/inner/chat', { message: text }, ev => {
+      if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '内层 Agent'); cur.textContent = ev.text; scrollBottom('innerMsgs'); }
+      else if (ev.type === 'tool_call') {
+        const c = document.createElement('div');
+        c.className = 'toolcard';
+        c.innerHTML = `<div class="tc-head">🔧 ${esc(ev.plugin)}</div><div class="tc-args">入参：${esc(JSON.stringify(ev.args))}</div>`;
+        $('innerMsgs').appendChild(c); cur = null; scrollBottom('innerMsgs');
+        c._res = document.createElement('div'); c._res.className = 'tc-res';
+        c.appendChild(c._res);
+        $('innerMsgs')._lastTool = c;
+      }
+      else if (ev.type === 'tool_result') {
+        const lt = $('innerMsgs')._lastTool;
+        if (lt && lt._res) {
+          if (!ev.ok) lt.classList.add('fail');
+          lt._res.textContent = `${ev.ok ? '✓' : '✗'} ${ev.ms}ms：${ev.result}`;
+          scrollBottom('innerMsgs');
+        }
+      }
+      else if (ev.type === 'error') { appendMsg('innerMsgs', 'error', ev.content, ''); cur = null; }
+    });
+  } catch (e) { appendMsg('innerMsgs', 'error', e.message, ''); }
+  finally {
+    innerBusy = false;
+    input.disabled = false; $('innerSendBtn').disabled = false;
+    $('innerBusy').style.display = 'none';
+    input.focus();
+  }
+}
+
+// ==================== 外层对话（右栏） ====================
+let outerBusy = false;
+async function outerSend() {
+  if (outerBusy) return;
+  const input = $('outerInput');
+  const text = input.value.trim();
+  if (!text) return;
+  outerBusy = true;
+  input.disabled = true; $('outerSendBtn').disabled = true;
+  $('outerBusy').style.display = 'block';
+  input.value = '';
+  appendMsg('outerMsgs', 'user', text, '我');
+  const ai = appendMsg('outerMsgs', 'assistant', '', '外层 OpenCode');
+  let cur = ai;
+  let lastText = '';
+  try {
+    await streamSSE('/api/outer/chat', { message: text }, ev => {
+      if (ev.type === 'text') { lastText = ev.text; cur = ensureLive(ai, 'assistant', '外层 OpenCode'); cur.textContent = ev.text; scrollBottom('outerMsgs'); }
+      else if (ev.type === 'notice') { appendMsg('outerMsgs', 'error', ev.content, ''); }
+      else if (ev.type === 'proposals') {
+        if (ev.count > 0) { toast(`外层提出 ${ev.count} 项修改建议，请在底部审批栏处理`); loadProposals(); }
+        else { const n = document.createElement('div'); n.className = 'msg assistant'; n.style.alignSelf = 'stretch'; n.style.background = '#f0fdf4'; n.textContent = '（本次回复未包含可解析的建议，或建议无效）'; $('outerMsgs').appendChild(n); }
+      }
+      else if (ev.type === 'error') { appendMsg('outerMsgs', 'error', ev.content, ''); }
+    });
+  } catch (e) { appendMsg('outerMsgs', 'error', e.message, ''); }
+  finally {
+    outerBusy = false;
+    input.disabled = false; $('outerSendBtn').disabled = false;
+    $('outerBusy').style.display = 'none';
+  }
+}
+
+// ==================== 消息渲染辅助 ====================
+function appendMsg(boxId, cls, text, who) {
+  const box = $(boxId);
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  if (who) { const w = document.createElement('div'); w.className = 'who'; w.textContent = who; d.appendChild(w); }
+  const t = document.createElement('div');
+  t.textContent = text;
+  d.appendChild(t);
+  d._text = t;
+  box.appendChild(d);
+  scrollBottom(boxId);
+  return d;
+}
+function ensureLive(msgEl, cls, who) { return msgEl._text; }
+function scrollBottom(id) { const b = $(id); b.scrollTop = b.scrollHeight; }
+$('innerInput').addEventListener('keydown', e => { if (e.key === 'Enter') innerSend(); });
+$('outerInput').addEventListener('keydown', e => { if (e.key === 'Enter') outerSend(); });
+
+// ==================== 审批栏（底部） ====================
+let proposals = [];
+async function loadProposals() {
+  const d = await api('/api/proposals');
+  proposals = d.proposals || [];
+  renderProposals();
+}
+function toggleApprovalPanel() { $('approvalPanel').classList.toggle('open'); }
+function renderProposals() {
+  $('abCount').textContent = proposals.length;
+  $('abEmpty').style.display = proposals.length ? 'none' : '';
+  $('approvalPanel').innerHTML = proposals.map(p => {
+    const diffHtml = diffHtmlFor(p);
+    return `<div class="ap-item">
+      <div class="ap-head">
+        <span class="ap-action ${p.action}">${{ create: '新建', update: '更新', delete: '删除' }[p.action]}</span>
+        <span class="ap-plugin">${esc(p.plugin)}.js</span>
+        <span class="ap-src">${p.source === 'manual' ? '手动' : '外层建议'} · ${new Date(p.createdAt).toLocaleTimeString()}</span>
+      </div>
+      <div class="ap-reason">${esc(p.reason || '')}</div>
+      ${diffHtml}
+      <div class="ap-ops">
+        <button class="btn-ok" onclick="decide('${p.id}', true)">批准（快照→应用→热加载）</button>
+        <button class="btn-no" onclick="decide('${p.id}', false)">否决</button>
+      </div>
+    </div>`;
+  }).join('');
+  if (proposals.length) $('approvalPanel').classList.add('open');
+}
+// 简易行级 diff：公共前缀/后缀之外的整块标变更
+function diffHtmlFor(p) {
+  if (p.action === 'delete') {
+    return `<div class="diff-box">${esc(p.old).split('\n').map(l => `<span class="d-del">- ${esc(l) || ' '}</span>`).join('')}</div>`;
+  }
+  if (p.action === 'create') {
+    return `<div class="diff-box">${String(p.code).split('\n').map(l => `<span class="d-add">+ ${esc(l) || ' '}</span>`).join('')}</div>`;
+  }
+  // update：公共前后缀 + 中部旧删新增
+  const a = String(p.old || '').split('\n'), b = String(p.code || '').split('\n');
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const keepHead = a.slice(0, pre), delMid = a.slice(pre, a.length - suf), addMid = b.slice(pre, b.length - suf), keepTail = a.slice(a.length - suf);
+  const line = (cls, mark, s) => `<span class="${cls}">${mark} ${esc(s) || ' '}</span>`;
+  return `<div class="diff-box">${keepHead.map(l => line('d-keep', ' ', l)).join('')}${delMid.map(l => line('d-del', '-', l)).join('')}${addMid.map(l => line('d-add', '+', l)).join('')}${keepTail.map(l => line('d-keep', ' ', l)).join('')}</div>`;
+}
+async function decide(id, approve) {
+  const d = await api('/api/proposals/decide', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, approve }) });
+  if (d.success) {
+    toast(approve ? '已批准：快照已保存，插件已热加载' : '已否决');
+    if (d.plugins) { pluginData = d.plugins; renderPlugins(); }
+    loadProposals();
+  }
+}
+async function doRollback() {
+  if (!confirm('回滚到最近一次快照？（当前状态会先自动快照，回滚本身也可回滚）')) return;
+  const d = await api('/api/rollback', { method: 'POST' });
+  if (d.success) { toast('已回滚：' + (d.restored || []).join('、')); if (d.plugins) { pluginData = d.plugins; renderPlugins(); } }
+}
+
+// ==================== 配置 ====================
+function openConfig() {
+  api('/api/config').then(d => {
+    $('cfgBase').value = d.config.inner.base_url || '';
+    $('cfgKey').value = d.config.inner.api_key || '';
+    $('cfgModel').value = d.config.inner.model || '';
+    $('configMask').classList.add('show');
+  });
+}
+function closeConfig() { $('configMask').classList.remove('show'); }
+async function saveConfigUi() {
+  const d = await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inner: { base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() } }) });
+  if (d.success) { closeConfig(); toast('配置已保存'); loadHealth(); }
+}
+
+// ==================== 审计 ====================
+async function loadAudit() {
+  const d = await api('/api/audit');
+  $('auditList').innerHTML = (d.audit || []).map(a =>
+    `<div>[${new Date(a.ts).toLocaleTimeString()}] <b>${esc(a.op)}</b> ${a.action ? esc(a.action) : ''} ${a.plugin ? esc(a.plugin) : ''} ${a.source ? '(' + esc(a.source) + ')' : ''}${a.error ? ' ⚠ ' + esc(a.error) : ''}</div>`
+  ).join('') || '（暂无）';
+  $('auditMask').classList.add('show');
+}
+
+// ==================== 启动 ====================
+loadHealth();
+loadPlugins();
+loadProposals();
+</script>
+</body>
+</html>
