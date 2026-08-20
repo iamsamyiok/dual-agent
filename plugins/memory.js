@@ -23,7 +23,21 @@ function loadJSON(fp, fallback = []) {
 
 function saveJSON(fp, data) {
   fs.mkdirSync(path.dirname(fp), { recursive: true });
-  fs.writeFileSync(fp, JSON.stringify(data, null, 1), 'utf8');
+  try { fs.writeFileSync(fp, JSON.stringify(data, null, 1), 'utf8'); }
+  catch (e) { console.error('[memory] 记忆落盘失败:', e && e.message || e); return false; }
+  return true;
+}
+
+// 单调递增 id：seq 文件持久化计数器；兜底不低于现存最大 id（防手改/迁移回退）
+// 旧版用 arr.length + 1，删除条目后 id 冲突会命中错条目
+function allocId(file) {
+  const seqFp = file + '.seq';
+  let seq = 0;
+  try { seq = Number(JSON.parse(fs.readFileSync(seqFp, 'utf8')).seq) || 0; } catch { /* 首次初始化 */ }
+  const maxExisting = loadJSON(file, []).reduce((mx, m) => Math.max(mx, Number(m.id) || 0), 0);
+  seq = Math.max(seq, maxExisting) + 1;
+  try { fs.writeFileSync(seqFp, JSON.stringify({ seq }), 'utf8'); } catch (e) { console.error('[memory] id 计数器落盘失败:', e && e.message || e); }
+  return seq;
 }
 
 // tags 归一化：模型偶发传字符串（"['a','b']" 或 "a,b"），统一转字符串数组
@@ -70,58 +84,25 @@ module.exports = {
     // ========== save ==========
     if (action === 'save') {
       const content = String(args.content || '').trim();
-      if (!content) return 'content 为空';
+      if (!content) throw new Error('content 为空'); // 软失败统一 throw → 框架标记 ok=false，防模型误读成功
       
       if (level === 'session') {
         // 会话级：不持久化，只返回提示
         return '会话级记忆由框架自动管理，无需手动保存';
       }
       
-      // 去重检查：搜索是否已存在相似内容（前50字模糊匹配 + 关键标签）
-      const checkContent = content.slice(0, 50);
+      // 去重检查：仅精确内容匹配视为重复（旧版关键词/标签模糊命中会把不同事实误判为已存在，静默丢数据）
       const checkLevel = level === 'long' ? 'long' : 'short';
-      const existing = loadJSON(files[checkLevel], []).filter(m => {
-        const existingContent = m.content.slice(0, 50);
-        // 模糊匹配：检查是否包含相同关键词
-        const checkWords = checkContent.split(/\s+/).filter(w => w.length > 2);
-        if (checkWords.some(w => existingContent.includes(w))) return true;
-        // 标签完全匹配
-        const existingTags = new Set(m.tags || []);
-        const newTags = new Set(tags);
-        if (newTags.size > 0 && [...newTags].every(t => existingTags.has(t))) return true;
-        return false;
-      });
+      const existing = loadJSON(files[checkLevel], []).filter(m => m.content === content);
       if (existing.length > 0) {
-        // 找到重复，返回现有ID
-        return `记忆已存在（#${existing[0].id}），无需重复保存`;
+        return `记忆已存在（#${existing[existing.length - 1].id}），内容完全相同，无需重复保存`;
       }
-      
-      // 新增：保存到长期记忆时，检查是否已有相同标签的记忆，合并而非重复
-      if (level === 'long') {
-        const longMem = loadJSON(files.long, []);
-        const sameTagMem = longMem.filter(m => {
-          const existingTags = new Set(m.tags || []);
-          const newTags = new Set(tags);
-          return [...newTags].some(t => existingTags.has(t)) && m.content !== content;
-        });
-        if (sameTagMem.length > 0) {
-          // 更新现有记忆，而不是创建重复
-          const toUpdate = sameTagMem[0];
-          const arr = longMem.map(m => {
-            if (m.id === toUpdate.id) {
-              return { ...m, content: content.slice(0, 500), ts: Date.now() };
-            }
-            return m;
-          });
-          saveJSON(files.long, arr);
-          return `已更新长期记忆 #${toUpdate.id}：${content.slice(0, 50)}...`;
-        }
-      }
-      
+
+      // 同标签/相似记忆一律追加（旧版“同标签覆盖第一条”会静默覆盖不同事实）
       if (level === 'short') {
         const arr = loadJSON(files.short, []);
         const item = {
-          id: arr.length + 1,
+          id: allocId(files.short),
           ts: Date.now(),
           content: content.slice(0, 500),
           tags: tags.slice(0, 3),
@@ -129,14 +110,14 @@ module.exports = {
         };
         arr.push(item);
         while (arr.length > MAX_SHORT) arr.shift();
-        saveJSON(files.short, arr);
+        if (!saveJSON(files.short, arr)) return '近期记忆保存失败：磁盘写入异常';
         return `已保存到近期记忆 #${item.id}：${content.slice(0, 50)}...`;
       }
-      
+
       if (level === 'long') {
         const arr = loadJSON(files.long, []);
         const item = {
-          id: arr.length + 1,
+          id: allocId(files.long),
           ts: Date.now(),
           content: content.slice(0, 1000),
           tags: tags.slice(0, 5),
@@ -144,7 +125,7 @@ module.exports = {
         };
         arr.push(item);
         while (arr.length > MAX_LONG) arr.shift();
-        saveJSON(files.long, arr);
+        if (!saveJSON(files.long, arr)) return '长期记忆保存失败：磁盘写入异常';
         return `已保存到长期记忆 #${item.id}：${content.slice(0, 50)}...`;
       }
     }
@@ -152,7 +133,7 @@ module.exports = {
     // ========== search ==========
     if (action === 'search') {
       const query = String(args.query || '').trim();
-      if (!query) return 'query 为空';
+      if (!query) throw new Error('query 为空'); // 软失败统一 throw → 框架标记 ok=false
       
       const q = query.toLowerCase();
       const results = [];

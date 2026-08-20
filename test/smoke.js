@@ -75,11 +75,11 @@ async function main() {
     assert.ok(!plugins.NAME_RE.test('a/b'));
     assert.ok(plugins.NAME_RE.test('my-tool'));
   });
-  await t('插件清单：8 个插件，essential 均可加载', () => {
+  await t('插件清单：9 个插件，essential 均可加载', () => {
     const list = plugins.listPlugins();
-    assert.equal(list.length, 8);
+    assert.equal(list.length, 9);
     assert.ok(list.every(p => p.status !== 'broken'), '存在 broken：' + JSON.stringify(list.filter(p => p.status === 'broken')));
-    assert.equal(list.filter(p => p.essential).length, 6);
+    assert.equal(list.filter(p => p.essential).length, 5);
   });
   await t('runPlugin：执行超时兜底生效（300ms）', async () => {
     fs.writeFileSync(path.join(PLUGINS_TMP, 'sleeper.js'), `module.exports = { run: () => new Promise(r => setTimeout(() => r('late'), 5000)) };`);
@@ -95,7 +95,20 @@ async function main() {
     await plugins.runPlugin('memory', { action: 'save', content: '端口 3788', tags: ['env'] }, ctx);
     const hit = await plugins.runPlugin('memory', { action: 'search', query: '端口' }, ctx);
     assert.ok(hit.includes('端口 3788'), hit);
-    assert.ok(fs.existsSync(path.join(WS, '.memory.json')), '记忆应存工作区（随工作区隔离）');
+    assert.ok(fs.existsSync(path.join(WS, '.memory-short.json')), '记忆应存工作区（随工作区隔离）');
+  });
+  await t('memory 插件：单调 id（删除后新增不复用）+ 同标签追加不覆盖', async () => {
+    const s1 = await plugins.runPlugin('memory', { action: 'save', content: '事实甲', tags: ['proj'] }, ctx);
+    assert.ok(s1.includes('#2'), '前序用例已占 #1，本条应为 #2：' + s1); // #1 = 上一用例的"端口 3788"
+    const s2 = await plugins.runPlugin('memory', { action: 'save', content: '事实乙', tags: ['proj'] }, ctx);
+    assert.ok(s2.includes('#3'), s2);
+    const d1 = await plugins.runPlugin('memory', { action: 'delete', id: 2 }, ctx);
+    assert.ok(d1.includes('已删除'), d1);
+    const s3 = await plugins.runPlugin('memory', { action: 'save', content: '事实丙', tags: ['proj'] }, ctx);
+    assert.ok(s3.includes('#4'), '删除后新增应继续单调递增（旧版会复用 id 撞车）：' + s3);
+    const arr = JSON.parse(fs.readFileSync(path.join(WS, '.memory-short.json'), 'utf8'));
+    assert.equal(arr.length, 3, '同标签应追加保留，不应覆盖：' + JSON.stringify(arr));
+    assert.ok(arr.some(m => m.content === '事实乙') && arr.some(m => m.content === '事实丙'), '同标签两条事实都应存在');
   });
   await t('todo 插件：add/toggle/clear', async () => {
     const a = await plugins.runPlugin('todo', { action: 'add', text: '写周报' }, ctx);
@@ -270,7 +283,7 @@ async function main() {
 
   console.log(`\n[3/3] e2e（MOCK 模式，端口 ${PORT}）`);
   const srv = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, DUAL_AGENT_MOCK: '1', DUAL_AGENT_DATA: DATA_TMP, DUAL_AGENT_PLUGINS_DIR: PLUGINS_TMP, PORT: String(PORT) },
+    env: { ...process.env, DUAL_AGENT_MOCK: '1', DUAL_AGENT_DATA: DATA_TMP, DUAL_AGENT_PLUGINS_DIR: PLUGINS_TMP, DUAL_AGENT_WS_ROOT: path.join(TMP, 'ws-root'), PORT: String(PORT) },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   srv.stderr.on('data', d => process.stderr.write('[srv] ' + d));
@@ -331,20 +344,27 @@ async function main() {
     assert.ok((await r.text()).includes('@name bash'));
   });
   await t('评审提示：3 次失败后 suggest=true，ack 后恢复', async () => {
-    // 注：前序外层对话已把 reviewMark 推进到当前水位，此处写 5 条失败确保阈值触发
-    fs.writeFileSync(path.join(DATA_TMP, 'inner-log.json'), JSON.stringify([1, 2, 3, 4, 5].map(i => ({ ts: Date.now(), plugin: 'x', args: {}, ok: false, result: 'f' + i, ms: 1 }))));
+    // 注：前序外层对话已把 reviewMark 推进到当前水位，此处写 5 条失败确保阈值触发（JSONL 追加式）
+    fs.writeFileSync(path.join(DATA_TMP, 'inner-log.jsonl'), [1, 2, 3, 4, 5].map(i => JSON.stringify({ ts: Date.now(), plugin: 'x', args: {}, ok: false, result: 'f' + i, ms: 1 })).join('\n') + '\n');
     const h1 = await (await fetch(base + '/api/review-hint')).json();
     assert.ok(h1.suggest === true && h1.fails >= 3, JSON.stringify(h1));
     await fetch(base + '/api/review-ack', { method: 'POST' });
     const h2 = await (await fetch(base + '/api/review-hint')).json();
     assert.ok(h2.suggest === false);
   });
-  await t('多工作区：切换 test-ws → 会话清空 + 目录创建', async () => {
+  await t('多工作区：切换 test-ws 目录创建 + 新区会话为空', async () => {
     const r = await (await fetch(base + '/api/workspace/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'test-ws' }) })).json();
     assert.ok(r.success && r.current === 'test-ws');
-    assert.ok(fs.existsSync(path.join(ROOT, 'workspaces', 'test-ws')));
+    assert.ok(fs.existsSync(path.join(TMP, 'ws-root', 'test-ws')));
     const m = await (await fetch(base + '/api/inner/messages')).json();
-    assert.equal(m.messages.length, 0, '切换工作区后内层会话应清空');
+    assert.equal(m.messages.length, 0, '新工作区会话应为空');
+  });
+  await t('多工作区：切回 default 历史完整恢复（分片存档）', async () => {
+    const r = await (await fetch(base + '/api/workspace/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'default' }) })).json();
+    assert.ok(r.success && r.current === 'default');
+    const m = await (await fetch(base + '/api/inner/messages')).json();
+    assert.ok(m.messages.some(x => x.role === 'user' && x.content === '演示'), '切回原工作区应恢复历史（旧版切换即销毁）');
+    assert.ok(fs.existsSync(path.join(TMP, 'ws-root', 'default', 'inner-messages.json')), '会话应按工作区分片落盘');
   });
   await t('工作区名非法被拒绝', async () => {
     const r = await (await fetch(base + '/api/workspace/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '../evil' }) })).json();

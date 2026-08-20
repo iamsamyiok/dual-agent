@@ -5,15 +5,14 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.5.0';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
-const WS_ROOT = path.join(ROOT, 'workspaces'); // 多工作区根目录（每个工作区一个任务域）
+const WS_ROOT = process.env.DUAL_AGENT_WS_ROOT || path.join(ROOT, 'workspaces'); // 多工作区根目录（每个工作区一个任务域；可用环境变量覆盖供测试隔离）
 const WS_NAME_RE = /^[a-z0-9-]{1,40}$/;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
-const INNER_LOG_PATH = path.join(DATA_DIR, 'inner-log.json');
-const INNER_MSG_PATH = path.join(DATA_DIR, 'inner-messages.json');
+const LEGACY_MSG_PATH = path.join(DATA_DIR, 'inner-messages.json'); // 旧版全局会话，一次性迁移用
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(WS_ROOT, { recursive: true });
@@ -45,7 +44,13 @@ function saveConfig(patch) {
     if (k in patch) next[k] = patch[k];
   }
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
+    try { fs.chmodSync(CONFIG_PATH, 0o600); } catch { /* 非 POSIX 环境忽略 */ }
+  } catch (e) {
+    console.log('[config] 配置落盘失败（当前配置仅存活于内存，重启即失）:', e && e.message || e);
+    throw new Error('配置保存失败：' + (e && e.message || e));
+  }
   return next;
 }
 function maskedConfig() {
@@ -95,24 +100,63 @@ function appendProcess(text) {
   } catch { /* ignore */ }
 }
 
-// ---------- 内层运行日志（环形最近 200 条；单向同步给外层上下文） ----------
+// ---------- 内层运行日志（JSONL 追加式：每条一行 append，读时取尾 200 条；消除全量读改写） ----------
+const INNER_LOG_JSONL = path.join(DATA_DIR, 'inner-log.jsonl');
 function getInnerLog() {
-  try { return JSON.parse(fs.readFileSync(INNER_LOG_PATH, 'utf8')); } catch { return []; }
+  try {
+    // 大文件优化：只读尾部 256KB（约 300+ 条），避免日志增长后每次全量读
+    const st = fs.statSync(INNER_LOG_JSONL);
+    const readFrom = Math.max(0, st.size - 256 * 1024);
+    const fd = fs.openSync(INNER_LOG_JSONL, 'r');
+    const buf = Buffer.alloc(st.size - readFrom);
+    fs.readSync(fd, buf, 0, buf.length, readFrom);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').split('\n').filter(Boolean);
+    const list = [];
+    for (const l of lines) { try { list.push(JSON.parse(l)); } catch { /* 跳过残行 */ } }
+    // readFrom > 0 时首行可能是截断残行，已被 JSON.parse 跳过
+    return list.slice(-200);
+  } catch { return []; }
 }
 function appendInnerLog(entry) {
-  const list = getInnerLog();
-  list.push(entry);
-  try { fs.writeFileSync(INNER_LOG_PATH, JSON.stringify(list.slice(-200), null, 1)); } catch { /* ignore */ }
+  try {
+    fs.appendFileSync(INNER_LOG_JSONL, JSON.stringify(entry) + '\n', 'utf8');
+    // 体量保护：超 2MB 截断到尾部 1MB（低频滚动，append 主路径零读开销）
+    try {
+      const st = fs.statSync(INNER_LOG_JSONL);
+      if (st.size > 2 * 1024 * 1024) {
+        const fd = fs.openSync(INNER_LOG_JSONL, 'r');
+        const buf = Buffer.alloc(st.size - 1024 * 1024);
+        fs.readSync(fd, buf, 0, buf.length, 1024 * 1024);
+        fs.closeSync(fd);
+        const lines = buf.toString('utf8').split('\n').filter(Boolean).slice(1); // 丢弃首截断行
+        fs.writeFileSync(INNER_LOG_JSONL, lines.map(l => l + '\n').join(''));
+      }
+    } catch { /* 截断失败不影响主流程 */ }
+  } catch (e) { console.log('[log] 内层日志追加失败:', e && e.message || e); } // 关键写失败可见
 }
 
-// ---------- 内层消息历史（落盘，重启恢复；切换工作区时清空） ----------
-const innerMessages = (() => {
-  try { return JSON.parse(fs.readFileSync(INNER_MSG_PATH, 'utf8')) || []; } catch { return []; }
-})();
+// ---------- 内层消息历史（按工作区分片落盘：workspaces/<ws>/inner-messages.json；切换换载而非清空，历史保留） ----------
+let innerMessages = [];
+function wsMsgPath(ws) { return path.join(WS_ROOT, ws || currentWorkspace(), 'inner-messages.json'); }
+function loadInnerMessages() {
+  try { innerMessages = JSON.parse(fs.readFileSync(wsMsgPath(), 'utf8')) || []; }
+  catch {
+    innerMessages = [];
+    // 一次性迁移：0.4.0 及之前的全局会话归入当前工作区，迁移后改名防止重复吸入其他工作区
+    try {
+      const legacy = JSON.parse(fs.readFileSync(LEGACY_MSG_PATH, 'utf8'));
+      if (Array.isArray(legacy) && legacy.length) { innerMessages = legacy; persistInnerMessages(); }
+      fs.renameSync(LEGACY_MSG_PATH, LEGACY_MSG_PATH + '.migrated');
+    } catch { /* 无旧数据 */ }
+  }
+}
 function persistInnerMessages() {
-  try { fs.writeFileSync(INNER_MSG_PATH, JSON.stringify(innerMessages.slice(-60), null, 1)); } catch { /* ignore */ }
+  try { fs.writeFileSync(wsMsgPath(), JSON.stringify(innerMessages.slice(-60), null, 1)); }
+  catch (e) { console.log('[persist] 内层会话落盘失败:', e && e.message || e); } // 关键写失败必须可见
 }
 function clearInnerMessages() { innerMessages.length = 0; persistInnerMessages(); }
+loadInnerMessages();
 
 // ---------- HTTP 基础 ----------
 function json(res, code, data) {
@@ -268,7 +312,7 @@ const server = http.createServer(async (req, res) => {
       if (!WS_NAME_RE.test(name)) { json(res, 400, { success: false, error: '工作区名不合法（小写字母/数字/连字符）' }); return; }
       saveConfig({ workspace: name, outerSession: '', reviewMark: getInnerLog().length });
       fs.mkdirSync(path.join(WS_ROOT, name), { recursive: true });
-      clearInnerMessages(); // 跨工作区上下文隔离
+      loadInnerMessages(); // 会话按工作区分片：切换=换载，原工作区历史保留可切回
       json(res, 200, { success: true, current: name, workspaces: listWorkspaces(), workspaceDir: path.join(WS_ROOT, name) });
       return;
     }
@@ -333,8 +377,10 @@ const server = http.createServer(async (req, res) => {
       innerMessages.push({ role: 'user', content: message });
       persistInnerMessages();
       const callPlugin = async (name, args) => {
+        const t0 = Date.now();
         const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR });
-        appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: 0 });
+        // 一次追加完整条目（含耗时），替代旧的“占位+回读覆写”两段式
+        appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0 });
         return result;
       };
       try {
@@ -351,12 +397,6 @@ const server = http.createServer(async (req, res) => {
           } else if (ev.type === 'error') {
             flushText();
             appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);
-          }
-          if (ev.type === 'tool_result') {
-            // 日志补记耗时
-            const list = getInnerLog();
-            const last = list[list.length - 1];
-            if (last && last.plugin === ev.plugin) { last.ms = ev.ms; last.ok = ev.ok; try { fs.writeFileSync(INNER_LOG_PATH, JSON.stringify(list.slice(-200), null, 1)); } catch { /* ignore */ } }
           }
           send(ev);
         });

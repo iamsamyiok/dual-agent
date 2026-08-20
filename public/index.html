@@ -351,7 +351,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.3.2';
+const PAGE_VERSION = '0.5.0';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -774,6 +774,47 @@ async function outerSend() {
   await runOuterChat(text);
 }
 
+// ==================== 刷新恢复：服务端仍在执行内层任务时，恢复锁定 UI 并轮询至完成 ====================
+const INNER_BUSY_DEFAULT_TIP = $('innerBusy').textContent;
+async function recoverRunningTask() {
+  let d;
+  try { d = await api('/api/process'); } catch { return; }
+  if (!d.running) return;
+  const input = $('innerInput');
+  innerBusy = true;
+  input.disabled = true; $('innerSendBtn').disabled = true;
+  $('innerBusy').textContent = '任务执行中（页面刷新恢复）… 完整过程已实时记录到 process.md';
+  $('innerBusy').style.display = 'block';
+  const bar = document.createElement('div');
+  bar.className = 'toolsummary';
+  bar.title = '双击打开完整过程页';
+  bar.ondblclick = () => window.open('/process', '_blank');
+  bar.innerHTML = '<span class="ts-dot"></span><span>任务执行中 · 本页刚刷新，服务端执行不受影响，完成后自动解锁</span><span class="ts-hint">双击查看完整过程</span>';
+  $('innerMsgs').appendChild(bar);
+  scrollBottom('innerMsgs');
+  const timer = setInterval(async () => {
+    try {
+      const s = await api('/api/process');
+      if (!s.running) {
+        clearInterval(timer);
+        innerBusy = false;
+        input.disabled = false; $('innerSendBtn').disabled = false;
+        $('innerBusy').style.display = 'none';
+        $('innerBusy').textContent = INNER_BUSY_DEFAULT_TIP;
+        await loadInnerHistory();
+        const done = document.createElement('div');
+        done.className = 'toolsummary done';
+        done.title = '双击打开完整过程页';
+        done.ondblclick = () => window.open('/process', '_blank');
+        done.innerHTML = '<span class="ts-done">✓</span><span>上一任务已完成（刷新期间执行），结果见上方对话，完整过程记录在 process.md</span><span class="ts-hint">双击打开</span>';
+        $('innerMsgs').appendChild(done);
+        scrollBottom('innerMsgs');
+        input.focus();
+      }
+    } catch { /* 网络抖动，下轮重试 */ }
+  }, 2000);
+}
+
 // ==================== 消息渲染辅助 ====================
 function appendMsg(boxId, cls, text, who) {
   const box = $(boxId);
@@ -1072,6 +1113,7 @@ loadPlugins();
 loadProposals();
 loadWorkspaces();
 loadInnerHistory();
+recoverRunningTask();
 pollReviewHint();
 initCollapsible();
 setInterval(pollReviewHint, 20000);

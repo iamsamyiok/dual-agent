@@ -76,9 +76,9 @@ module.exports = {
 };
 ```
 
-- 预装 8 个插件：
-  - 工具类：read / write / edit / bash / fetch（网页抓取转文本）
-  - 记忆类：memory（跨会话持久记忆，存工作区 `.memory.json`）
+- 预装 9 个插件：
+  - 工具类：read / write / edit / bash / fetch（网页抓取转文本）/ search（免 key 多引擎搜索：Serper → Bing → DuckDuckGo 降级链）
+  - 记忆类：memory（跨会话持久记忆，存工作区 `.memory-short.json` / `.memory-long.json`，单调递增 id）
   - 技能类：skill（任务方法论沉淀，markdown 存工作区 `skills/`）
   - 任务类：todo（跨轮任务清单，存工作区 `.todo.json`）
 - 前端「新建插件」提供三类模板（工具 / 记忆 / 技能），一键预填骨架代码
@@ -96,13 +96,13 @@ module.exports = {
 
 ## 多工作区
 
-每个工作区一个任务域（`workspaces/<name>/`）：内层会话、记忆（`.memory.json`）、技能（`skills/`）、任务清单（`.todo.json`）随工作区隔离，切换即换上下文；插件全局共享。
+每个工作区一个任务域（`workspaces/<name>/`）：内层会话（`inner-messages.json` 分片存档，切走再切回历史完整恢复）、记忆、技能、任务清单随工作区隔离；插件全局共享。
 
 ## 测试
 
 ```bash
 node test/smoke.js
-# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（29 项断言）
+# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（47 项断言）
 ```
 
 ## 环境变量
@@ -114,6 +114,6 @@ node test/smoke.js
 | DUAL_AGENT_AUTO_APPROVE=0 | 关闭 opencode --auto（可能因权限询问卡住） |
 | DUAL_AGENT_OPENCODE_CMD | 显式指定 opencode 完整路径（Windows 检测失效时使用） |
 | DUAL_AGENT_PLUGIN_TIMEOUT_MS | 单次插件执行兜底超时（默认 60000） |
-| DUAL_AGENT_DATA / DUAL_AGENT_PLUGINS_DIR | 数据/插件目录覆盖（测试隔离用） |
+| DUAL_AGENT_DATA / DUAL_AGENT_PLUGINS_DIR / DUAL_AGENT_WS_ROOT | 数据/插件/工作区目录覆盖（测试隔离用） |
 
 Windows 注意：npm 全局安装的 opencode 是 `.cmd` 垫片，程序会自动从 `where` 结果中优先选择可执行垫片并以 shell 方式启动；若仍失败，用 `DUAL_AGENT_OPENCODE_CMD` 指定完整路径。bash 插件在 Windows 下自动先切 UTF-8 代码页（`chcp 65001`）防中文乱码。
