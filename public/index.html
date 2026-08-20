@@ -82,8 +82,11 @@
   .msg .who { font-size: 10.5px; color: #9ca3af; margin-bottom: 3px; }
   .msg.user .who { color: #bfdbfe; }
    .toolcard { align-self: stretch; max-width: 100%; border: 1px dashed #c7d2fe; background: #f8faff; border-radius: 8px; font-size: 11.5px; overflow: hidden; }
-   .toolcard .tc-head { color: #4338ca; font-family: Consolas, monospace; padding: 6px 10px; cursor: pointer; display: flex; align-items: center; gap: 6px; user-select: none; }
+   .toolcard .tc-head { color: #4338ca; font-family: Consolas, monospace; padding: 6px 10px; cursor: pointer; display: flex; align-items: center; gap: 6px; user-select: none; flex-wrap: wrap; }
    .toolcard .tc-head:hover { background: #f0f4ff; }
+   .toolcard .tc-brief { color: #6b7280; font-size: 10.5px; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+   .toolcard .tc-result-brief { color: #059669; font-size: 10.5px; max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: sans-serif; }
+   .toolcard .tc-result-brief.fail { color: #b91c1c; }
    .toolcard .tc-toggle { font-size: 10px; color: #6366f1; transition: transform 0.2s; display: inline-block; }
    .toolcard .tc-toggle.collapsed { transform: rotate(-90deg); }
    .toolcard .tc-args { color: #6b7280; font-family: Consolas, monospace; margin: 0 10px 6px; word-break: break-all; }
@@ -716,7 +719,10 @@ async function innerSend() {
       else if (ev.type === 'tool_call') {
         const c = document.createElement('div');
         c.className = 'toolcard collapsed';
-        c.innerHTML = `<div class="tc-head"><span class="tc-toggle collapsed">▼</span> 🔧 ${esc(ev.plugin)}</div><div class="tc-body"><div class="tc-args">入参：${esc(JSON.stringify(ev.args))}</div><div class="tc-res"></div></div>`;
+        // 参数摘要：折叠时也能在头部看到关键参数（如 path/command 前 60 字符）
+        let argBrief = '';
+        try { const a = ev.args || {}; const k = ['path', 'command', 'action', 'query', 'name'].find(x => a[x]); if (k) argBrief = String(a[k]).slice(0, 60); } catch { /* ignore */ }
+        c.innerHTML = `<div class="tc-head"><span class="tc-toggle collapsed">▼</span> 🔧 ${esc(ev.plugin)}${argBrief ? `<span class="tc-brief">${esc(argBrief)}</span>` : ''}</div><div class="tc-body"><div class="tc-args">入参：${esc(JSON.stringify(ev.args))}</div><div class="tc-res"></div></div>`;
         c.querySelector('.tc-head').onclick = () => {
           c.classList.toggle('collapsed');
           c.querySelector('.tc-toggle').classList.toggle('collapsed');
@@ -728,7 +734,12 @@ async function innerSend() {
       else if (ev.type === 'tool_result') {
         const lt = $('innerMsgs')._lastTool;
         if (lt && lt._res) {
-          if (!ev.ok) lt.classList.add('fail');
+          if (!ev.ok) { lt.classList.add('fail'); lt.classList.remove('collapsed'); lt.querySelector('.tc-toggle').classList.remove('collapsed'); }
+          // 头部结果摘要：折叠状态下也能一眼看到结果/错误
+          const brief = document.createElement('span');
+          brief.className = 'tc-result-brief' + (ev.ok ? '' : ' fail');
+          brief.textContent = (ev.ok ? '✓ ' : '✗ ') + String(ev.result || '').slice(0, 80).replace(/\s+/g, ' ');
+          lt.querySelector('.tc-head').appendChild(brief);
           lt._res.innerHTML = `<div class="tc-res-status">${ev.ok ? '✓' : '✗'} ${ev.ms}ms</div><div class="tc-res-content">${esc(ev.result)}</div>`;
           scrollBottom('innerMsgs');
         }
