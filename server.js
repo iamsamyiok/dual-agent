@@ -228,7 +228,7 @@ const server = http.createServer(async (req, res) => {
       persistInnerMessages();
       const callPlugin = async (name, args) => {
         const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR });
-        appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错))/.test(result), result: String(result).slice(0, 400), ms: 0 });
+        appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: 0 });
         return result;
       };
       try {

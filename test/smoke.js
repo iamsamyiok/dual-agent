@@ -110,6 +110,35 @@ async function main() {
     assert.ok((await plugins.runPlugin('skill', { action: 'save', name: '../bad', content: 'x' }, ctx)).includes('不合法'));
   });
 
+  const { sanitizeToolArguments } = require(path.join(ROOT, 'lib', 'inner'));
+  await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
+    assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
+    assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));
+  });
+  await t('sanitize：截断/非法输入降级 {}（防下一轮 API 400）', () => {
+    assert.equal(sanitizeToolArguments(`{"path": "x"`), '{}');
+    assert.equal(sanitizeToolArguments('process.exit()'), '{}');
+    assert.equal(sanitizeToolArguments(''), '{}');
+    assert.equal(sanitizeToolArguments(null), '{}');
+    const legal = '{"path":"a"}';
+    assert.equal(sanitizeToolArguments(legal), legal); // 合法原样
+  });
+  await t('runPlugin：缺必填参数返回可重试错误（不再 EISDIR）', async () => {
+    const out = await plugins.runPlugin('write', {}, ctx); // 复现线上事故：LLM 空参调 write
+    assert.ok(out.includes('调用被拒绝') && out.includes('path'), out);
+    assert.ok(!out.includes('EISDIR'), out);
+  });
+  await t('runPlugin：参数非对象被拦截', async () => {
+    const out = await plugins.runPlugin('write', 'just a string', ctx);
+    assert.ok(out.includes('必须是 JSON 对象'), out);
+  });
+  await t('write/read：目标是目录给明确提示', async () => {
+    const w = await plugins.runPlugin('write', { path: '.', content: 'x' }, ctx);
+    assert.ok(w.includes('是目录'), w);
+    const r = await plugins.runPlugin('read', { path: '.' }, ctx);
+    assert.ok(r.includes('是目录') || r.includes('目录'), r);
+  });
+
   const approval = require(path.join(ROOT, 'lib', 'approval'));
   let badId = '', warnId = '';
   await t('addProposal：语法错误代码被拒绝入队', () => {
