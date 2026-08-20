@@ -63,11 +63,12 @@ module.exports = {
         return '会话级记忆由框架自动管理，无需手动保存';
       }
       
-      // 去重检查：搜索是否已存在相似内容（前20字匹配）
-      const dedupKey = content.slice(0, 20);
+      // 去重检查：搜索是否已存在相似内容（前30字匹配 + 关键标签）
+      const dedupKey = content.slice(0, 30);
       const checkLevel = level === 'long' ? 'long' : 'short';
       const existing = loadJSON(files[checkLevel], []).filter(m => 
-        m.content.slice(0, 20) === dedupKey
+        m.content.slice(0, 30) === dedupKey ||
+        (m.tags || []).some(t => (args.tags || []).includes(t))
       );
       if (existing.length > 0) {
         return `记忆已存在（#${existing[0].id}），无需重复保存`;
