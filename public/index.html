@@ -71,36 +71,34 @@
   .mini-btn.danger:hover { border-color: #ef4444; color: #ef4444; }
   #addPluginBtn { margin: 8px; }
   .ws-bar { display: flex; gap: 6px; align-items: center; padding: 8px 10px; border-bottom: 1px solid #e5e7eb; flex-shrink: 0; }
-  .ws-bar select { flex: 1; border: 1px solid #d1d5db; border-radius: 6px; padding: 4px 6px; font-size: 12px; background: #fff; outline: none; }
+  .ws-label { font-size: 11px; color: #6b7280; flex-shrink: 0; cursor: help; }
+  .ws-bar select { flex: 1; min-width: 0; border: 1px solid #d1d5db; border-radius: 6px; padding: 4px 6px; font-size: 12px; background: #fff; outline: none; }
 
   /* 中/右栏：对话 */
-  .chat-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  .chat-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; scroll-behavior: smooth; }
+  /* 关键：flex 子项禁止垂直压缩，否则消息多时内容被截断显示不全 */
+  .chat-body > * { flex-shrink: 0; }
+  /* 加宽加明显的滚动条（内容显示不全时方便滚动） */
+  .chat-body::-webkit-scrollbar { width: 12px; }
+  .chat-body::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 6px; }
+  .chat-body::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 6px; border: 2px solid #f1f5f9; }
+  .chat-body::-webkit-scrollbar-thumb:hover { background: #64748b; }
+  .chat-body { scrollbar-width: auto; scrollbar-color: #94a3b8 #f1f5f9; }
   .msg { max-width: 92%; border-radius: 10px; padding: 8px 12px; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; }
   .msg.user { align-self: flex-end; background: #3b82f6; color: #fff; }
   .msg.assistant { align-self: flex-start; background: #f3f4f6; border: 1px solid #e5e7eb; }
   .msg.error { align-self: stretch; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; max-width: 100%; }
   .msg .who { font-size: 10.5px; color: #9ca3af; margin-bottom: 3px; }
   .msg.user .who { color: #bfdbfe; }
-   /* 工具条：单行动态显示（双击在 /process 页看完整过程） */
-   .toolcard { align-self: stretch; max-width: 100%; border: 1px solid #dbe4ff; background: #f8faff; border-radius: 7px; font-size: 11.5px; overflow: hidden; }
-   .toolcard .tc-head { color: #4338ca; font-family: Consolas, monospace; padding: 4px 10px; cursor: pointer; display: flex; align-items: center; gap: 8px; user-select: none; white-space: nowrap; overflow: hidden; }
-   .toolcard .tc-head:hover { background: #eef2ff; }
-   .toolcard .tc-plugin { font-weight: 600; flex-shrink: 0; }
-   .toolcard .tc-brief { color: #6b7280; font-size: 11px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
-   .toolcard .tc-status { margin-left: auto; flex-shrink: 0; font-size: 11px; color: #f59e0b; }
-   .toolcard .tc-status.ok { color: #10b981; }
-   .toolcard .tc-status.fail { color: #ef4444; }
-   .toolcard .tc-run-dot { width: 7px; height: 7px; border-radius: 50%; background: #f59e0b; flex-shrink: 0; animation: tcpulse 1s infinite; }
-   @keyframes tcpulse { 0%,100% { opacity: 1; } 50% { opacity: 0.2; } }
-   .toolcard.open .tc-run-dot { animation: none; background: #a5b4fc; }
-   .toolcard .tc-args { color: #6b7280; font-family: Consolas, monospace; margin: 4px 10px 2px; word-break: break-all; white-space: pre-wrap; }
-   .toolcard .tc-body { display: none; padding: 0 10px 8px; }
-   .toolcard.open .tc-body { display: block; }
-   .toolcard .tc-res { color: #374151; font-size: 11px; }
-   .toolcard .tc-res-status { color: #6b7280; font-family: Consolas, monospace; margin: 4px 0; }
-   .toolcard .tc-res-content { white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
-   .toolcard.fail { border-color: #fecaca; background: #fef8f8; }
-   .toolcard.fail .tc-head { color: #b91c1c; }
+   /* 工具调用汇总条：每个任务单条，完整过程在 /process 页 */
+   .toolsummary { align-self: stretch; max-width: 100%; border: 1px solid #dbe4ff; background: #f8faff; border-radius: 7px; padding: 5px 12px; font-size: 11.5px; color: #4338ca; display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
+   .toolsummary:hover { background: #eef2ff; }
+   .toolsummary .ts-dot { width: 7px; height: 7px; border-radius: 50%; background: #f59e0b; flex-shrink: 0; animation: tspulse 1s infinite; }
+   @keyframes tspulse { 0%,100% { opacity: 1; } 50% { opacity: 0.2; } }
+   .toolsummary.done .ts-dot { display: none; }
+   .toolsummary .ts-done { color: #10b981; font-weight: 700; flex-shrink: 0; }
+   .toolsummary .ts-arg { color: #6b7280; }
+   .toolsummary .ts-hint { margin-left: auto; flex-shrink: 0; font-size: 10.5px; color: #93c5fd; }
   .composer { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #e5e7eb; flex-shrink: 0; }
   .composer input { flex: 1; border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; outline: none; }
   .composer input:focus { border-color: #3b82f6; }
@@ -198,8 +196,9 @@
         <button class="toggle-btn" onclick="toggleCol('pluginCol')" title="折叠/展开">✕</button>
       </div>
       <div class="ws-bar">
-        <select id="wsSel" onchange="switchWorkspace(this.value)" title="切换工作区（记忆/技能/任务上下文随工作区隔离）"></select>
-        <button class="mini-btn" onclick="newWorkspace()">＋ 新建</button>
+        <span class="ws-label" title="工作区：隔离不同项目的会话、记忆、技能与执行过程。切换后内层从新项目的上下文开始，互不干扰">工作区</span>
+        <select id="wsSel" onchange="switchWorkspace(this.value)" title="切换工作区（会话/记忆/技能/过程文件随工作区隔离）"></select>
+        <button class="mini-btn" onclick="newWorkspace()" title="新建一个独立工作区（用于新项目）">＋</button>
       </div>
       <div id="pluginList"></div>
       <button class="mini-btn" id="addPluginBtn" onclick="openPluginEditor('')">＋ 新建插件</button>
@@ -218,7 +217,7 @@
         <button class="toggle-btn" onclick="toggleCol('innerCol')" title="折叠/展开">✕</button>
       </div>
       <div class="chat-body" id="innerMsgs"></div>
-      <div class="busy-tip" id="innerBusy">执行中… 插件调用与思考过程实时展示</div>
+      <div class="busy-tip" id="innerBusy">执行中… 完整过程已实时记录到 process.md（双击任务汇总条或点顶部「过程」查看）</div>
       <div class="composer">
         <input id="innerInput" placeholder="给内层下任务（执行中输入锁定）" autocomplete="off">
         <button id="innerSendBtn" onclick="innerSend()">发送</button>
@@ -424,7 +423,7 @@ function renderPlugins() {
           <span class="pl-dot ${p.status}"></span>
           <span class="pl-name">${esc(p.name)}</span>
           <span class="pl-badge ${p.essential ? '' : 'biz'}">${p.essential ? '基础' : '业务'}</span>
-          ${p.status === 'broken' ? '<span class="pl-badge bad">损坏</span>' : (p.status === 'lazy' ? '<span class="pl-badge">懒加载</span>' : '')}
+          ${p.status === 'broken' ? '<span class="pl-badge bad">损坏</span>' : ''}
         </div>
         <div class="pl-desc">${esc(p.status === 'broken' && p.err ? p.err.split('\n')[0] : (p.desc || '（无描述）'))}</div>
         ${p.status === 'broken' ? `<div class="pl-err" id="perr-${esc(p.name)}">${esc(p.err || '未知错误')}</div>` : ''}
@@ -721,46 +720,43 @@ async function innerSend() {
   try {
     await streamSSE('/api/inner/chat', { message: text }, ev => {
       if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '内层 Agent'); cur.textContent = ev.text; scrollBottom('innerMsgs'); }
-      else if (ev.type === 'tool_call') {
-        const c = document.createElement('div');
-        c.className = 'toolcard';
-        // 单行动态条：🔧 插件名 + 参数摘要 + 状态（执行中 → ✓/✗ 耗时）；双击在 /process 页看完整过程
-        let argBrief = '';
-        try { const a = ev.args || {}; const k = ['path', 'command', 'action', 'query', 'name'].find(x => a[x]); if (k) argBrief = String(a[k]).slice(0, 70); } catch { /* ignore */ }
-        c.innerHTML = `<div class="tc-head" title="单击展开详情，双击打开完整过程页"><span class="tc-run-dot"></span><span class="tc-plugin">🔧 ${esc(ev.plugin)}</span>${argBrief ? `<span class="tc-brief">${esc(argBrief)}</span>` : ''}<span class="tc-status running">执行中</span></div><div class="tc-body"><div class="tc-args">入参：${esc(JSON.stringify(ev.args))}</div><div class="tc-res"></div></div>`;
-        const head = c.querySelector('.tc-head');
-        let clickTimer = null;
-        head.onclick = () => {
-          if (clickTimer) return; // 双击的第二次点击不触发展开
-          clickTimer = setTimeout(() => { c.classList.toggle('open'); clickTimer = null; }, 200);
-        };
-        head.ondblclick = () => {
-          if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
-          window.open('/process', '_blank');
-        };
-        $('innerMsgs').appendChild(c); cur = null; scrollBottom('innerMsgs');
-        c._res = c.querySelector('.tc-res');
-        c._status = c.querySelector('.tc-status');
-        $('innerMsgs')._lastTool = c;
-      }
-      else if (ev.type === 'tool_result') {
-        const lt = $('innerMsgs')._lastTool;
-        if (lt && lt._res) {
-          if (!ev.ok) lt.classList.add('fail');
-          if (lt._status) {
-            lt._status.textContent = (ev.ok ? '✓ ' : '✗ ') + ev.ms + 'ms';
-            lt._status.className = 'tc-status ' + (ev.ok ? 'ok' : 'fail');
-          }
-          // 展开态详情显示前 600 字符（完整内容看 /process 过程页）
-          const brief = String(ev.result || '').slice(0, 600) + (String(ev.result || '').length > 600 ? '\n…（完整内容双击工具条查看过程页）' : '');
-          lt._res.innerHTML = `<div class="tc-res-status">${ev.ok ? '✓' : '✗'} ${ev.ms}ms</div><div class="tc-res-content">${esc(brief)}</div>`;
-          scrollBottom('innerMsgs');
+      else if (ev.type === 'tool_call' || ev.type === 'tool_result') {
+        // 单条汇总状态条：不逐条显示工具调用（完整过程在 /process 过程页与 process.md）
+        let bar = $('innerMsgs')._toolBar;
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.className = 'toolsummary';
+          bar.title = '双击打开完整过程页';
+          bar.ondblclick = () => window.open('/process', '_blank');
+          $('innerMsgs').appendChild(bar);
+          $('innerMsgs')._toolBar = bar;
+          const s = bar._stat = { calls: 0, fails: 0, cur: '', done: false };
+          bar.onclick = () => { if (s.done) window.open('/process', '_blank'); };
         }
+        const s = bar._stat;
+        if (ev.type === 'tool_call') {
+          s.calls += 1; s.cur = ev.plugin;
+          let argBrief = '';
+          try { const a = ev.args || {}; const k = ['path', 'command', 'action', 'query', 'name'].find(x => a[x]); if (k) argBrief = String(a[k]).slice(0, 50); } catch { /* ignore */ }
+          bar.innerHTML = `<span class="ts-dot"></span><span>执行中 · 第 ${s.calls} 次调用：${esc(ev.plugin)}${argBrief ? ' <span class="ts-arg">' + esc(argBrief) + '</span>' : ''}</span><span class="ts-hint">双击查看完整过程</span>`;
+        } else {
+          if (!ev.ok) s.fails += 1;
+          if (!bar._done) bar.innerHTML = `<span class="ts-dot"></span><span>执行中 · 已完成 ${s.calls} 次调用${s.fails ? `（${s.fails} 次失败）` : ''}：${esc(ev.plugin)}</span><span class="ts-hint">双击查看完整过程</span>`;
+        }
+        bar._done = false;
+        scrollBottom('innerMsgs');
       }
       else if (ev.type === 'error') { appendMsg('innerMsgs', 'error', ev.content, ''); cur = null; }
     });
   } catch (e) { appendMsg('innerMsgs', 'error', e.message, ''); }
   finally {
+    // 状态条定格为汇总行（完整过程在 /process 页）
+    const bar = $('innerMsgs')._toolBar;
+    if (bar && bar._stat) {
+      const s = bar._stat; s.done = true; bar._done = true; bar.classList.add('done');
+      bar.innerHTML = `<span class="ts-done">${s.fails ? '⚠' : '✓'}</span><span>本任务共 ${s.calls} 次插件调用${s.fails ? `，${s.fails} 次失败` : ''}，完整过程已记录到 process.md</span><span class="ts-hint">双击打开</span>`;
+    }
+    $('innerMsgs')._toolBar = null;
     innerBusy = false;
     input.disabled = false; $('innerSendBtn').disabled = false;
     $('innerBusy').style.display = 'none';
