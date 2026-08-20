@@ -1,5 +1,5 @@
 // @name memory
-// @desc 内层 Agent 跨会话持久记忆：save 记录 / search 检索 / list 最近 / delete 删除（存于数据目录 memory.json）
+// @desc 内层 Agent 跨会话持久记忆：save 记录 / search 检索 / list 最近 / delete 删除（存于当前工作区 .memory.json，随工作区隔离）
 // @essential true
 const fs = require('fs');
 const path = require('path');
@@ -7,8 +7,8 @@ const path = require('path');
 const MAX_ITEMS = 500; // 记忆条数上限（超出裁掉最旧的）
 
 function memFile(ctx) {
-  // 记忆属于跨会话状态，存数据目录（.data/），与任务工作区隔离
-  return path.join(ctx.dataDir || ctx.cwd, 'memory.json');
+  // 记忆属于跨会话状态且按工作区隔离：存当前工作区下的隐藏文件
+  return path.join(ctx.cwd, '.memory.json');
 }
 
 function load(ctx) {

@@ -46,11 +46,15 @@
   .pl-badge.biz { background: #f0fdf4; color: #16a34a; }
   .pl-badge.bad { background: #fef2f2; color: #ef4444; }
   .pl-desc { font-size: 11.5px; color: #6b7280; margin-top: 3px; white-space: normal; }
+  .pl-err { font-size: 11px; color: #b91c1c; margin-top: 3px; white-space: pre-wrap; word-break: break-all; display: none; font-family: Consolas, monospace; background: #fee2e2; border-radius: 4px; padding: 4px 6px; max-height: 100px; overflow-y: auto; }
+  .pl-err.open { display: block; }
   .pl-ops { margin-top: 6px; display: flex; gap: 6px; }
   .mini-btn { font-size: 11px; border: 1px solid #d1d5db; background: #fff; border-radius: 5px; padding: 2px 8px; cursor: pointer; color: #4b5563; }
   .mini-btn:hover { border-color: #3b82f6; color: #3b82f6; }
   .mini-btn.danger:hover { border-color: #ef4444; color: #ef4444; }
   #addPluginBtn { margin: 8px; }
+  .ws-bar { display: flex; gap: 6px; align-items: center; padding: 8px 10px; border-bottom: 1px solid #e5e7eb; flex-shrink: 0; }
+  .ws-bar select { flex: 1; border: 1px solid #d1d5db; border-radius: 6px; padding: 4px 6px; font-size: 12px; background: #fff; outline: none; }
 
   /* 中/右栏：对话 */
   .chat-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
@@ -104,10 +108,28 @@
   .btn-ok { background: #16a34a; color: #fff; border: none; border-radius: 6px; padding: 4px 14px; cursor: pointer; font-size: 12px; }
   .btn-no { background: #fff; color: #b91c1c; border: 1px solid #fca5a5; border-radius: 6px; padding: 4px 14px; cursor: pointer; font-size: 12px; }
   .btn-ok:hover { background: #15803d; }
-  .diff-box { border: 1px solid #e5e7eb; border-radius: 6px; margin-top: 6px; max-height: 200px; overflow: auto; font: 11px/1.5 Consolas, monospace; background: #fafafa; }
+  .diff-box { border: 1px solid #e5e7eb; border-radius: 6px; margin-top: 6px; max-height: 240px; overflow: auto; font: 11px/1.5 Consolas, monospace; background: #fafafa; }
   .diff-box .d-del { background: #fee2e2; color: #7f1d1d; display: block; padding: 0 6px; white-space: pre-wrap; }
   .diff-box .d-add { background: #dcfce7; color: #14532d; display: block; padding: 0 6px; white-space: pre-wrap; }
   .diff-box .d-keep { display: block; padding: 0 6px; color: #6b7280; white-space: pre-wrap; }
+  .diff-box .d-fold { display: block; padding: 0 6px; color: #9ca3af; background: #f3f4f6; }
+  .ap-warn { background: #fef3c7; border: 1px solid #fcd34d; color: #92400e; border-radius: 6px; padding: 6px 10px; margin-top: 6px; font-size: 11.5px; }
+
+  /* 评审提示条（右栏顶部） */
+  .review-tip { display: none; margin: 10px 14px 0; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 8px; padding: 8px 12px; font-size: 12px; color: #92400e; }
+  .review-tip .rt-ops { margin-top: 6px; display: flex; gap: 8px; }
+
+  /* 向导 */
+  .wiz-card { background: #fff; border-radius: 12px; width: min(560px, 92vw); max-height: 88vh; overflow-y: auto; padding: 22px 26px; }
+  .wiz-card h3 { font-size: 16px; margin-bottom: 4px; }
+  .wiz-card .sub { font-size: 12px; color: #6b7280; margin-bottom: 14px; }
+  .wiz-step { border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+  .wiz-step .ws-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
+  .wiz-step .num { width: 20px; height: 20px; border-radius: 50%; background: #3b82f6; color: #fff; font-size: 11px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .wiz-step .num.ok { background: #16a34a; }
+  .wiz-step .num.bad { background: #ef4444; }
+  .wiz-step .body { font-size: 12px; color: #4b5563; margin-top: 6px; line-height: 1.7; }
+  .wiz-step code { background: #f3f4f6; border-radius: 4px; padding: 1px 6px; font-size: 11.5px; }
 
   /* 弹窗 */
   .mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; z-index: 50; }
@@ -139,16 +161,22 @@
     <!-- 左：插件管理 -->
     <section class="col" id="pluginCol">
       <div class="col-head">插件管理 <span class="hint">手动增删改（自动快照可回滚）</span></div>
+      <div class="ws-bar">
+        <select id="wsSel" onchange="switchWorkspace(this.value)" title="切换工作区（记忆/技能/任务上下文随工作区隔离）"></select>
+        <button class="mini-btn" onclick="newWorkspace()">＋ 新建</button>
+      </div>
       <div id="pluginList"></div>
       <button class="mini-btn" id="addPluginBtn" onclick="openPluginEditor('')">＋ 新建插件</button>
+      <button class="mini-btn" style="margin: 0 8px 8px" onclick="$('importFile').click()">⬆ 导入插件</button>
+      <input type="file" id="importFile" accept=".js,text/javascript" style="display:none" onchange="importPlugin(this)">
     </section>
 
     <!-- 中：内层对话 -->
     <section class="col" id="innerCol">
-      <div class="col-head">内层 Agent <span class="hint" id="innerModelTag"></span></div>
-      <div class="chat-body" id="innerMsgs">
-        <div class="msg assistant">我是内层 Agent，通过插件（read / write / edit / bash 及业务插件）完成任务。执行过程中的每次插件调用都会记录日志，供外层观察。</div>
+      <div class="col-head">内层 Agent <span class="hint" id="innerModelTag"></span><span class="grow" style="flex:1"></span>
+        <button class="mini-btn" onclick="resetInnerChat()" title="清空当前工作区的内层会话">清空会话</button>
       </div>
+      <div class="chat-body" id="innerMsgs"></div>
       <div class="busy-tip" id="innerBusy">执行中… 插件调用与思考过程实时展示</div>
       <div class="composer">
         <input id="innerInput" placeholder="给内层下任务（执行中输入锁定）" autocomplete="off">
@@ -158,7 +186,10 @@
 
     <!-- 右：外层对话 -->
     <section class="col" id="outerCol">
-      <div class="col-head">外层 OpenCode <span class="hint">自动携带内层日志+插件状态，仅输出插件修改建议</span></div>
+      <div class="col-head">外层 OpenCode <span class="hint" id="outerSessTag"></span><span class="grow" style="flex:1"></span>
+        <button class="mini-btn" onclick="newOuterSession()" title="清空 opencode 会话记忆，下次全新上下文">新会话</button>
+      </div>
+      <div class="review-tip" id="reviewTip"></div>
       <div class="chat-body" id="outerMsgs">
         <div class="msg assistant">我是外层迭代 Agent（opencode）。我会观察内层日志与插件状态，提出插件增删改建议——所有建议需你在底部审批栏批准后才会生效。</div>
       </div>
@@ -234,11 +265,46 @@
   </div>
 </div>
 
+<!-- 首次运行向导 -->
+<div class="mask" id="wizMask">
+  <div class="wiz-card">
+    <h3>欢迎使用双层 Agent 自迭代系统</h3>
+    <div class="sub">三步跑起来；已就绪的项目会自动跳过本向导</div>
+    <div class="wiz-step" id="wizStep1">
+      <div class="ws-head"><span class="num" id="wizNum1">1</span> 安装外层引擎 OpenCode</div>
+      <div class="body" id="wizBody1">
+        命令行执行：<br><code>npm install -g opencode-ai</code><br>
+        登录配置模型：<code>opencode auth login</code><br>
+        <button class="mini-btn" style="margin-top:6px" onclick="wizRedetect()">我已安装，重新检测</button>
+      </div>
+    </div>
+    <div class="wiz-step" id="wizStep2">
+      <div class="ws-head"><span class="num" id="wizNum2">2</span> 配置内层 LLM（OpenAI 兼容 API）</div>
+      <div class="body" id="wizBody2">
+        填写 base_url / api_key / model，密钥仅保存在本机。<br>
+        <button class="mini-btn" style="margin-top:6px" onclick="openConfig()">去配置</button>
+        <button class="mini-btn" style="margin-top:6px" onclick="wizRedetect()">已填好，重新检测</button>
+      </div>
+    </div>
+    <div class="wiz-step">
+      <div class="ws-head"><span class="num">3</span> 或者先体验演示模式</div>
+      <div class="body">
+        不装任何东西也能跑通全流程（假 LLM + 假 opencode）：<br>
+        <code>DUAL_AGENT_MOCK=1 node server.js</code>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:6px">
+      <button class="btn-no" onclick="wizSkip()">跳过向导</button>
+      <button class="btn-ok" id="wizDoneBtn" onclick="wizDone()">完成</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.2.0';
+const PAGE_VERSION = '0.3.0';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -270,15 +336,19 @@ async function streamSSE(path, body, onEvent) {
 }
 
 // ==================== 健康状态 ====================
+let healthData = null;
 async function loadHealth() {
   const h = await api('/api/health');
+  healthData = h;
   const ti = $('tagInner'), to = $('tagOc');
   if (h.mock) { ti.textContent = '内层：演示模式'; ti.className = 'hd-tag ok'; to.textContent = '外层：演示模式'; to.className = 'hd-tag ok'; $('innerModelTag').textContent = 'DUAL_AGENT_MOCK=1'; }
   else {
     ti.textContent = h.innerConfigured ? '内层：已配置' : '内层：未配置'; ti.className = 'hd-tag' + (h.innerConfigured ? ' ok' : ' bad');
     to.textContent = h.opencode ? 'OpenCode：就绪' : 'OpenCode：未安装'; to.className = 'hd-tag' + (h.opencode ? ' ok' : ' bad');
     if (!h.innerConfigured) toast('内层 API 未配置，点右上角「配置」填写');
+    $('outerSessTag').textContent = h.outerSession ? `会话续聊中（${h.outerSession.slice(0, 12)}…）` : '自动携带内层日志+插件状态';
   }
+  wizRefresh();
 }
 
 // ==================== 插件管理（左栏） ====================
@@ -308,14 +378,67 @@ function renderPlugins() {
           <span class="pl-badge ${p.essential ? '' : 'biz'}">${p.essential ? '基础' : '业务'}</span>
           ${p.status === 'broken' ? '<span class="pl-badge bad">损坏</span>' : (p.status === 'lazy' ? '<span class="pl-badge">懒加载</span>' : '')}
         </div>
-        <div class="pl-desc">${esc(p.desc || '（无描述）')}${p.err ? `<br>⚠ ${esc(p.err)}` : ''}</div>
+        <div class="pl-desc">${esc(p.status === 'broken' && p.err ? p.err.split('\n')[0] : (p.desc || '（无描述）'))}</div>
+        ${p.status === 'broken' ? `<div class="pl-err" id="perr-${esc(p.name)}">${esc(p.err || '未知错误')}</div>` : ''}
         <div class="pl-ops">
-          <button class="mini-btn" onclick="openPluginEditor('${esc(p.name)}')">编辑</button>
+          <button class="mini-btn" onclick="openPluginEditor('${esc(p.name)}')">${p.status === 'broken' ? '修复' : '编辑'}</button>
+          ${p.status === 'broken' ? `<button class="mini-btn" onclick="togglePlErr('${esc(p.name)}')">错误详情</button>` : `<button class="mini-btn" onclick="exportPlugin('${esc(p.name)}')">导出</button>`}
           <button class="mini-btn danger" onclick="delPlugin('${esc(p.name)}')">删除</button>
         </div>
       </div>`).join('');
   }
   el.innerHTML = html || '<div class="pl-group">（无插件）</div>';
+}
+function togglePlErr(name) { $('perr-' + name).classList.toggle('open'); }
+function exportPlugin(name) { location.href = '/api/plugins/export?name=' + encodeURIComponent(name); }
+
+// 导入插件：读取本地 .js 文件 → 打开编辑器预填（走正常保存管线：快照+审计+热加载）
+function importPlugin(input) {
+  const f = input.files && input.files[0];
+  input.value = '';
+  if (!f) return;
+  const name = f.name.replace(/\.js$/i, '').toLowerCase();
+  const reader = new FileReader();
+  reader.onload = () => {
+    openPluginEditor('');
+    $('peName').value = name;
+    $('peCode').value = String(reader.result || '');
+    peDirty = true; // 导入内容视为已编辑，防模板一键覆盖
+    toast('已载入文件，检查无误后点保存');
+  };
+  reader.readAsText(f);
+}
+
+// ==================== 工作区（记忆/技能/会话随工作区隔离） ====================
+let wsCurrent = 'default';
+async function loadWorkspaces() {
+  const d = await api('/api/workspaces');
+  if (!d.success) return;
+  wsCurrent = d.current;
+  $('wsSel').innerHTML = (d.workspaces || []).map(n => `<option value="${esc(n)}" ${n === d.current ? 'selected' : ''}>${esc(n)}</option>`).join('');
+}
+async function switchWorkspace(name) {
+  if (name === wsCurrent) return;
+  if (!confirm(`切换到工作区「${name}」？当前内层会话与外层会话将被清空（记忆/技能保留在各工作区）`)) { $('wsSel').value = wsCurrent; return; }
+  const d = await api('/api/workspace/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+  if (d.success) {
+    wsCurrent = d.current;
+    toast('已切换工作区：' + d.current);
+    await loadInnerHistory();
+    await loadHealth();
+  }
+}
+async function newWorkspace() {
+  const name = prompt('新工作区名（小写字母/数字/连字符），如 task-crawler：');
+  if (!name) return;
+  const d = await api('/api/workspace/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim().toLowerCase() }) });
+  if (d.success) {
+    wsCurrent = d.current;
+    $('wsSel').innerHTML = (d.workspaces || []).map(n => `<option value="${esc(n)}" ${n === d.current ? 'selected' : ''}>${esc(n)}</option>`).join('');
+    await loadInnerHistory();
+    await loadHealth();
+    toast('已创建并切换到工作区：' + d.current);
+  }
 }
 // 三类插件模板：工具（函数调用）/ 记忆（跨会话状态）/ 技能（方法论沉淀）
 const PLUGIN_TEMPLATES = {
@@ -451,7 +574,10 @@ async function savePluginUi() {
   const code = $('peCode').value;
   if (!name) { toast('请填写插件名'); return; }
   const d = await api('/api/plugins/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, code }) });
-  if (d.success) { pluginData = d.plugins; renderPlugins(); closePluginEditor(); toast('已保存（快照+热加载完成）'); }
+  if (d.success) {
+    pluginData = d.plugins; renderPlugins(); closePluginEditor();
+    toast(d.warns && d.warns.length ? `已保存（含风险提醒：${d.warns.join('；')}）` : '已保存（快照+热加载完成）');
+  }
 }
 async function delPlugin(name) {
   if (!confirm(`删除插件 ${name}？（自动快照，可在审批栏回滚）`)) return;
@@ -461,6 +587,21 @@ async function delPlugin(name) {
 
 // ==================== 内层对话（中栏） ====================
 let innerBusy = false;
+// 恢复当前工作区的历史会话（重启/刷新/切换工作区后调用）
+async function loadInnerHistory() {
+  const d = await api('/api/inner/messages');
+  const box = $('innerMsgs');
+  box.innerHTML = '<div class="msg assistant">我是内层 Agent，通过插件（read / write / edit / bash / memory / skill 等业务插件）完成任务。执行过程中的每次插件调用都会记录日志，供外层观察。</div>';
+  for (const m of (d.messages || [])) {
+    if (m.role === 'user') appendMsg('innerMsgs', 'user', m.content, '我');
+    else if (m.role === 'assistant' && m.content) appendMsg('innerMsgs', 'assistant', m.content, '内层 Agent');
+  }
+}
+async function resetInnerChat() {
+  if (!confirm('清空当前工作区的内层会话上下文？（插件文件与记忆不受影响）')) return;
+  const d = await api('/api/inner/reset', { method: 'POST' });
+  if (d.success) { await loadInnerHistory(); toast('内层会话已清空'); }
+}
 async function innerSend() {
   if (innerBusy) return;
   const input = $('innerInput');
@@ -569,6 +710,7 @@ function renderProposals() {
   $('abEmpty').style.display = proposals.length ? 'none' : '';
   $('approvalPanel').innerHTML = proposals.map(p => {
     const diffHtml = diffHtmlFor(p);
+    const warnHtml = (p.warns && p.warns.length) ? `<div class="ap-warn">⚠ 风险提醒（批准前请确认知情）：${esc(p.warns.join('；'))}</div>` : '';
     return `<div class="ap-item">
       <div class="ap-head">
         <span class="ap-action ${p.action}">${{ create: '新建', update: '更新', delete: '删除' }[p.action]}</span>
@@ -576,6 +718,7 @@ function renderProposals() {
         <span class="ap-src">${p.source === 'manual' ? '手动' : '外层建议'} · ${new Date(p.createdAt).toLocaleTimeString()}</span>
       </div>
       <div class="ap-reason">${esc(p.reason || '')}</div>
+      ${warnHtml}
       ${diffHtml}
       <div class="ap-ops">
         <button class="btn-ok" onclick="decide('${p.id}', true)">批准（快照→应用→热加载）</button>
@@ -585,23 +728,68 @@ function renderProposals() {
   }).join('');
   if (proposals.length) $('approvalPanel').classList.add('open');
 }
-// 简易行级 diff：公共前缀/后缀之外的整块标变更
+// 行级 diff：LCS 最长公共子序列（O(n·m)，超大文件退化为前后缀法），keep 段超 8 行折叠
+function diffOps(a, b) {
+  const n = a.length, m = b.length;
+  if (n * m > 400 * 400) {
+    // 退化：公共前后缀 + 中部整块替换
+    let pre = 0;
+    while (pre < n && pre < m && a[pre] === b[pre]) pre++;
+    let suf = 0;
+    while (suf < n - pre && suf < m - pre && a[n - 1 - suf] === b[m - 1 - suf]) suf++;
+    return [
+      ...a.slice(0, pre).map(s => ['keep', s]),
+      ...a.slice(pre, n - suf).map(s => ['del', s]),
+      ...b.slice(pre, m - suf).map(s => ['add', s]),
+      ...a.slice(n - suf).map(s => ['keep', s])
+    ];
+  }
+  // LCS 动态规划
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push(['keep', a[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push(['del', a[i]]); i++; }
+    else { ops.push(['add', b[j]]); j++; }
+  }
+  while (i < n) { ops.push(['del', a[i]]); i++; }
+  while (j < m) { ops.push(['add', b[j]]); j++; }
+  return ops;
+}
+function renderDiffBox(ops) {
+  // 连续 keep > 8 行折叠为「··· N 行未变」
+  const parts = [];
+  let k = 0;
+  while (k < ops.length) {
+    if (ops[k][0] === 'keep') {
+      let e = k;
+      while (e < ops.length && ops[e][0] === 'keep') e++;
+      const run = ops.slice(k, e);
+      if (run.length > 8) {
+        parts.push(...run.slice(0, 3), ['fold', `··· ${run.length - 6} 行未变 ···`], ...run.slice(-3));
+      } else parts.push(...run);
+      k = e;
+    } else { parts.push(ops[k]); k++; }
+  }
+  const line = (cls, mark, s) => `<span class="${cls}">${mark} ${esc(s) || ' '}</span>`;
+  return `<div class="diff-box">${parts.map(op =>
+    op[0] === 'keep' ? line('d-keep', ' ', op[1]) : op[0] === 'del' ? line('d-del', '-', op[1]) : op[0] === 'add' ? line('d-add', '+', op[1]) : line('d-fold', ' ', op[1])
+  ).join('')}</div>`;
+}
 function diffHtmlFor(p) {
   if (p.action === 'delete') {
-    return `<div class="diff-box">${esc(p.old).split('\n').map(l => `<span class="d-del">- ${esc(l) || ' '}</span>`).join('')}</div>`;
+    return renderDiffBox(String(p.old || '').split('\n').map(l => ['del', l]));
   }
   if (p.action === 'create') {
-    return `<div class="diff-box">${String(p.code).split('\n').map(l => `<span class="d-add">+ ${esc(l) || ' '}</span>`).join('')}</div>`;
+    return renderDiffBox(String(p.code || '').split('\n').map(l => ['add', l]));
   }
-  // update：公共前后缀 + 中部旧删新增
-  const a = String(p.old || '').split('\n'), b = String(p.code || '').split('\n');
-  let pre = 0;
-  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
-  let suf = 0;
-  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
-  const keepHead = a.slice(0, pre), delMid = a.slice(pre, a.length - suf), addMid = b.slice(pre, b.length - suf), keepTail = a.slice(a.length - suf);
-  const line = (cls, mark, s) => `<span class="${cls}">${mark} ${esc(s) || ' '}</span>`;
-  return `<div class="diff-box">${keepHead.map(l => line('d-keep', ' ', l)).join('')}${delMid.map(l => line('d-del', '-', l)).join('')}${addMid.map(l => line('d-add', '+', l)).join('')}${keepTail.map(l => line('d-keep', ' ', l)).join('')}</div>`;
+  return renderDiffBox(diffOps(String(p.old || '').split('\n'), String(p.code || '').split('\n')));
 }
 async function decide(id, approve) {
   const d = await api('/api/proposals/decide', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, approve }) });
@@ -641,10 +829,61 @@ async function loadAudit() {
   $('auditMask').classList.add('show');
 }
 
+// ==================== 外层新会话 ====================
+async function newOuterSession() {
+  if (!confirm('结束当前 opencode 会话？（下次提问将是全新上下文，外层不再记得之前对话）')) return;
+  const d = await api('/api/outer/new-session', { method: 'POST' });
+  if (d.success) { toast('已开启新会话'); loadHealth(); }
+}
+
+// ==================== 自动评审提示（内层累计/失败达到阈值） ====================
+async function pollReviewHint() {
+  const d = await api('/api/review-hint');
+  const tip = $('reviewTip');
+  if (!d.success || !d.suggest) { tip.style.display = 'none'; return; }
+  tip.style.display = 'block';
+  tip.innerHTML = `内层已累计 ${d.calls} 次插件调用（${d.fails} 次失败）未经外层评审，建议让外层观察并提出插件改进。
+    <div class="rt-ops">
+      <button class="mini-btn" onclick="startReview()">立即评审</button>
+      <button class="mini-btn" onclick="dismissReview()">忽略</button>
+    </div>`;
+}
+function startReview() {
+  $('outerInput').value = '请观察最近的内层运行日志与插件状态，指出问题并提出插件增删改建议。';
+  $('outerInput').focus();
+  dismissReview();
+}
+async function dismissReview() { $('reviewTip').style.display = 'none'; await api('/api/review-ack', { method: 'POST' }); }
+
+// ==================== 首次运行向导 ====================
+function wizRefresh() {
+  if (!healthData) return;
+  const need = !healthData.mock && (!healthData.innerConfigured || !healthData.opencode);
+  const seen = localStorage.getItem('daWizDone') === '1';
+  $('wizMask').classList.toggle('show', need && !seen);
+  if (!need && !seen) { localStorage.setItem('daWizDone', '1'); }
+  if (healthData.mock) return; // 演示模式无需配置，保持步骤原文
+  const mark = (numId, bodyId, ok, okText) => {
+    $(numId).className = 'num ' + (ok ? 'ok' : 'bad');
+    $(numId).textContent = ok ? '✓' : numId.slice(-1);
+    if (ok) $(bodyId).innerHTML = `<span style="color:#16a34a">${okText}</span>`;
+  };
+  mark('wizNum1', 'wizBody1', !!healthData.opencode, 'OpenCode 已就绪（' + esc(healthData.opencode) + '）');
+  mark('wizNum2', 'wizBody2', !!healthData.innerConfigured, '内层 API 已配置');
+}
+function wizRedetect() { loadHealth(); }
+function wizSkip() { localStorage.setItem('daWizDone', '1'); $('wizMask').classList.remove('show'); }
+function wizDone() { localStorage.setItem('daWizDone', '1'); $('wizMask').classList.remove('show'); toast('向导完成，开始使用吧'); }
+
 // ==================== 启动 ====================
 loadHealth();
 loadPlugins();
 loadProposals();
+loadWorkspaces();
+loadInnerHistory();
+pollReviewHint();
+setInterval(pollReviewHint, 20000);
+setInterval(loadHealth, 30000);
 </script>
 </body>
 </html>

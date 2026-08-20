@@ -5,16 +5,18 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.3.0';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
-const WORKSPACE_DIR = path.join(ROOT, 'workspace'); // 内层插件默认工作目录
+const WS_ROOT = path.join(ROOT, 'workspaces'); // 多工作区根目录（每个工作区一个任务域）
+const WS_NAME_RE = /^[a-z0-9-]{1,40}$/;
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const INNER_LOG_PATH = path.join(DATA_DIR, 'inner-log.json');
+const INNER_MSG_PATH = path.join(DATA_DIR, 'inner-messages.json');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+fs.mkdirSync(WS_ROOT, { recursive: true });
 
 const plugins = require('./lib/plugins');
 const approval = require('./lib/approval');
@@ -30,14 +32,18 @@ process.on('uncaughtException', e => console.log('[uncaught]', e && e.stack || e
 process.on('unhandledRejection', e => console.log('[unhandled]', e && (e.stack || e) || e));
 
 // ---------- 配置（内层 OpenAI 兼容 API；key 仅存本机） ----------
+const DEFAULT_CONFIG = { inner: { base_url: '', api_key: '', model: '' }, workspace: 'default', outerSession: '', reviewMark: 0 };
 function getConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return { inner: { base_url: '', api_key: '', model: '' } }; }
+  try { return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) }; } catch { return { ...DEFAULT_CONFIG }; }
 }
 function saveConfig(patch) {
   const cfg = getConfig();
   const next = { ...cfg, inner: { ...cfg.inner, ...(patch.inner || {}) } };
   // 前端回传打码值时保留原 key
   if (patch.inner && /ˣ{4}/.test(patch.inner.api_key || '')) next.inner.api_key = cfg.inner.api_key;
+  for (const k of ['workspace', 'outerSession', 'reviewMark']) {
+    if (k in patch) next[k] = patch[k];
+  }
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
   return next;
@@ -46,6 +52,23 @@ function maskedConfig() {
   const cfg = getConfig();
   const k = cfg.inner.api_key || '';
   return { ...cfg, inner: { ...cfg.inner, api_key: k ? k.slice(0, 3) + 'ˣˣˣˣ' : '' } };
+}
+
+// ---------- 多工作区（内层插件默认工作目录，记忆/技能随工作区隔离） ----------
+function currentWorkspace() {
+  const name = String(getConfig().workspace || 'default');
+  return WS_NAME_RE.test(name) ? name : 'default';
+}
+function workspaceDir() {
+  const dir = path.join(WS_ROOT, currentWorkspace());
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function listWorkspaces() {
+  let names = [];
+  try { names = fs.readdirSync(WS_ROOT).filter(n => WS_NAME_RE.test(n) && fs.statSync(path.join(WS_ROOT, n)).isDirectory()); } catch { /* ignore */ }
+  if (!names.includes('default')) names.unshift('default');
+  return names.sort();
 }
 
 // ---------- 内层运行日志（环形最近 200 条；单向同步给外层上下文） ----------
@@ -57,6 +80,15 @@ function appendInnerLog(entry) {
   list.push(entry);
   try { fs.writeFileSync(INNER_LOG_PATH, JSON.stringify(list.slice(-200), null, 1)); } catch { /* ignore */ }
 }
+
+// ---------- 内层消息历史（落盘，重启恢复；切换工作区时清空） ----------
+const innerMessages = (() => {
+  try { return JSON.parse(fs.readFileSync(INNER_MSG_PATH, 'utf8')) || []; } catch { return []; }
+})();
+function persistInnerMessages() {
+  try { fs.writeFileSync(INNER_MSG_PATH, JSON.stringify(innerMessages.slice(-60), null, 1)); } catch { /* ignore */ }
+}
+function clearInnerMessages() { innerMessages.length = 0; persistInnerMessages(); }
 
 // ---------- HTTP 基础 ----------
 function json(res, code, data) {
@@ -81,8 +113,6 @@ function sse(req, res) {
   return send;
 }
 
-// 内层消息历史（内存，每会话一条链；demo 单会话）
-const innerMessages = [];
 // opencode 检测缓存（detectOpencode 返回 { cmd, shell } | null）
 let ocCache = { ts: 0, runner: null };
 async function opencodeRunner() {
@@ -90,6 +120,10 @@ async function opencodeRunner() {
   ocCache = { ts: Date.now(), runner: await outerMod.detectOpencode() };
   return ocCache.runner;
 }
+
+// 执行互斥：同一时刻只允许一路内层 / 一路外层（防止并发 SSE 交叉写坏会话状态）
+let innerLock = false;
+let outerLock = false;
 
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
@@ -114,7 +148,8 @@ const server = http.createServer(async (req, res) => {
         success: true, version: APP_VERSION,
         mock: process.env.DUAL_AGENT_MOCK === '1',
         innerConfigured: !!(cfg.inner.base_url && cfg.inner.api_key && cfg.inner.model),
-        opencode: oc ? oc.cmd : '', workspace: WORKSPACE_DIR
+        opencode: oc ? oc.cmd : '', workspace: currentWorkspace(),
+        workspaceDir: workspaceDir(), outerSession: cfg.outerSession || ''
       });
       return;
     }
@@ -123,6 +158,22 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       saveConfig(body);
       json(res, 200, { success: true, config: maskedConfig() });
+      return;
+    }
+
+    // ---------- 多工作区 ----------
+    if (p === '/api/workspaces' && req.method === 'GET') {
+      json(res, 200, { success: true, current: currentWorkspace(), workspaces: listWorkspaces() });
+      return;
+    }
+    if (p === '/api/workspace/switch' && req.method === 'POST') {
+      const body = await readBody(req);
+      const name = String(body.name || '').trim();
+      if (!WS_NAME_RE.test(name)) { json(res, 400, { success: false, error: '工作区名不合法（小写字母/数字/连字符）' }); return; }
+      saveConfig({ workspace: name, outerSession: '', reviewMark: getInnerLog().length });
+      fs.mkdirSync(path.join(WS_ROOT, name), { recursive: true });
+      clearInnerMessages(); // 跨工作区上下文隔离
+      json(res, 200, { success: true, current: name, workspaces: listWorkspaces(), workspaceDir: path.join(WS_ROOT, name) });
       return;
     }
 
@@ -137,7 +188,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/plugins/save' && req.method === 'POST') {
       const body = await readBody(req);
       const r = approval.manualSave(String(body.name || '').trim(), String(body.code || ''));
-      json(res, 200, { success: r.ok, error: r.error, plugins: plugins.listPlugins().map(pl => ({ ...pl, code: plugins.readCode(pl.name) })) });
+      json(res, 200, { success: r.ok, error: r.error, warns: r.warns || [], plugins: plugins.listPlugins().map(pl => ({ ...pl, code: plugins.readCode(pl.name) })) });
       return;
     }
     if (p === '/api/plugins/delete' && req.method === 'POST') {
@@ -146,9 +197,21 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { success: r.ok, error: r.error, plugins: plugins.listPlugins().map(pl => ({ ...pl, code: plugins.readCode(pl.name) })) });
       return;
     }
+    if (p === '/api/plugins/export' && req.method === 'GET') {
+      const name = String(parsed.query.name || '').trim();
+      if (!plugins.NAME_RE.test(name) || !plugins.readCode(name)) { json(res, 404, { success: false, error: '插件不存在' }); return; }
+      const code = plugins.readCode(name);
+      res.writeHead(200, {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${name}.js"`
+      });
+      res.end(code);
+      return;
+    }
 
     // ---------- 内层对话 ----------
     if (p === '/api/inner/chat' && req.method === 'POST') {
+      if (innerLock) { json(res, 409, { success: false, error: '内层正在执行上一条任务，请稍候' }); return; }
       const body = await readBody(req);
       const message = String(body.message || '').trim();
       if (!message) { json(res, 400, { success: false, error: '消息为空' }); return; }
@@ -157,11 +220,14 @@ const server = http.createServer(async (req, res) => {
         json(res, 400, { success: false, error: '内层 API 未配置：点右上角「配置」填写 base_url / api_key / model' });
         return;
       }
+      innerLock = true;
       const send = sse(req, res);
       send({ type: 'start' });
+      const WS_DIR = workspaceDir();
       innerMessages.push({ role: 'user', content: message });
+      persistInnerMessages();
       const callPlugin = async (name, args) => {
-        const result = await plugins.runPlugin(name, args, { cwd: WORKSPACE_DIR, dataDir: DATA_DIR });
+        const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR });
         appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错))/.test(result), result: String(result).slice(0, 400), ms: 0 });
         return result;
       };
@@ -175,18 +241,31 @@ const server = http.createServer(async (req, res) => {
           }
           send(ev);
         });
+        persistInnerMessages();
         send({ type: 'done' });
       } catch (e) {
         send({ type: 'error', content: String((e && e.message) || e) });
         send({ type: 'done' });
       } finally {
+        innerLock = false;
         try { res.end(); } catch { /* closed */ }
       }
       return;
     }
+    if (p === '/api/inner/messages' && req.method === 'GET') {
+      json(res, 200, { success: true, messages: innerMessages.slice(-60) });
+      return;
+    }
+    if (p === '/api/inner/reset' && req.method === 'POST') {
+      if (innerLock) { json(res, 409, { success: false, error: '内层执行中，不能清空' }); return; }
+      clearInnerMessages();
+      json(res, 200, { success: true });
+      return;
+    }
 
-    // ---------- 外层对话 ----------
+    // ---------- 外层对话（opencode 会话续聊：-s ses_xxx，会话 ID 持久化） ----------
     if (p === '/api/outer/chat' && req.method === 'POST') {
+      if (outerLock) { json(res, 409, { success: false, error: '外层正在分析上一条指令，请稍候' }); return; }
       const body = await readBody(req);
       const message = String(body.message || '').trim();
       if (!message) { json(res, 400, { success: false, error: '消息为空' }); return; }
@@ -195,6 +274,9 @@ const server = http.createServer(async (req, res) => {
         json(res, 400, { success: false, error: '未检测到 opencode。安装：npm install -g opencode-ai，配置登录：opencode auth login；也可在环境变量 DUAL_AGENT_OPENCODE_CMD 指定完整路径' });
         return;
       }
+      outerLock = true;
+      const cfg = getConfig();
+      const sessionId = cfg.outerSession || '';
       const send = sse(req, res);
       send({ type: 'start' });
       // 单向上下文：软约束提示词 + 插件清单 + 内层日志（不含内层对话原文）
@@ -203,8 +285,14 @@ const server = http.createServer(async (req, res) => {
       try {
         const r = await outerMod.runOuter(runner, prompt, ROOT, ev => {
           if (ev.type === 'text') { fullText = ev.text; send(ev); }
-        });
+          else if (ev.type === 'session' && ev.sessionId && ev.sessionId !== sessionId) {
+            saveConfig({ outerSession: ev.sessionId }); // 首个 sessionID 回填，下次续聊
+            send(ev);
+          }
+        }, sessionId);
         if (r.error) send({ type: 'error', content: r.error });
+        // 发起评审即视为已处理评审提示
+        saveConfig({ reviewMark: getInnerLog().length });
         // 解析建议 json → 审批队列
         const props = outerMod.parseProposals(fullText);
         const added = [];
@@ -219,8 +307,30 @@ const server = http.createServer(async (req, res) => {
         send({ type: 'error', content: String((e && e.message) || e) });
         send({ type: 'done' });
       } finally {
+        outerLock = false;
         try { res.end(); } catch { /* closed */ }
       }
+      return;
+    }
+    if (p === '/api/outer/new-session' && req.method === 'POST') {
+      saveConfig({ outerSession: '' });
+      json(res, 200, { success: true });
+      return;
+    }
+
+    // ---------- 自动评审提示（内层累计调用/失败达到阈值时建议发起外层评审） ----------
+    if (p === '/api/review-hint' && req.method === 'GET') {
+      const log = getInnerLog();
+      const mark = Math.min(Number(getConfig().reviewMark) || 0, log.length);
+      const recent = log.slice(mark);
+      const calls = recent.length;
+      const fails = recent.filter(l => !l.ok).length;
+      json(res, 200, { success: true, suggest: calls >= 12 || fails >= 3, calls, fails, outerSession: getConfig().outerSession || '' });
+      return;
+    }
+    if (p === '/api/review-ack' && req.method === 'POST') {
+      saveConfig({ reviewMark: getInnerLog().length });
+      json(res, 200, { success: true });
       return;
     }
 
@@ -262,6 +372,6 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`双层 Agent 自迭代系统已启动: http://localhost:${PORT}`);
-  console.log(`内层工作目录: ${WORKSPACE_DIR}`);
+  console.log(`工作区: ${currentWorkspace()}（${workspaceDir()}）`);
   if (process.env.DUAL_AGENT_MOCK === '1') console.log('演示模式：内层假 LLM + 外层假 opencode（不依赖真实 API）');
 });

@@ -12,14 +12,17 @@ module.exports = {
     required: ['command']
   },
   run: async (args, ctx) => {
-    const cmd = String(args.command || '');
+    let cmd = String(args.command || '');
+    // Windows 控制台默认 GBK 编码，中文输出会乱码：先切 UTF-8 代码页再执行
+    if (process.platform === 'win32') cmd = 'chcp 65001 >nul & ' + cmd;
     return await new Promise((resolve) => {
       exec(cmd, {
         cwd: ctx.cwd,
         timeout: 30000,
         maxBuffer: 512 * 1024,
         killSignal: 'SIGKILL',
-        windowsHide: true
+        windowsHide: true,
+        encoding: 'utf8'
       }, (err, stdout, stderr) => {
         const out = String(stdout || '').trim();
         const errOut = String(stderr || '').trim();
