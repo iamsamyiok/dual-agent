@@ -88,7 +88,9 @@
    .toolcard .tc-toggle.collapsed { transform: rotate(-90deg); }
    .toolcard .tc-args { color: #6b7280; font-family: Consolas, monospace; margin: 0 10px 6px; word-break: break-all; }
    .toolcard .tc-body { padding: 0 10px 8px; }
-   .toolcard .tc-res { color: #374151; white-space: pre-wrap; max-height: 120px; overflow-y: auto; font-size: 11px; }
+   .toolcard .tc-res { color: #374151; font-size: 11px; }
+   .toolcard .tc-res-status { color: #6b7280; font-family: Consolas, monospace; margin-bottom: 4px; }
+   .toolcard .tc-res-content { white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
    .toolcard.fail { border-color: #fecaca; background: #fef8f8; }
    .toolcard.fail .tc-head { color: #b91c1c; }
    .toolcard.collapsed .tc-body { display: none; }
@@ -656,8 +658,8 @@ async function innerSend() {
       if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '内层 Agent'); cur.textContent = ev.text; scrollBottom('innerMsgs'); }
       else if (ev.type === 'tool_call') {
         const c = document.createElement('div');
-        c.className = 'toolcard';
-        c.innerHTML = `<div class="tc-head"><span class="tc-toggle">▼</span> 🔧 ${esc(ev.plugin)}</div><div class="tc-body"><div class="tc-args">入参：${esc(JSON.stringify(ev.args))}</div><div class="tc-res"></div></div>`;
+        c.className = 'toolcard collapsed';
+        c.innerHTML = `<div class="tc-head"><span class="tc-toggle collapsed">▼</span> 🔧 ${esc(ev.plugin)}</div><div class="tc-body"><div class="tc-args">入参：${esc(JSON.stringify(ev.args))}</div><div class="tc-res"></div></div>`;
         c.querySelector('.tc-head').onclick = () => {
           c.classList.toggle('collapsed');
           c.querySelector('.tc-toggle').classList.toggle('collapsed');
@@ -670,7 +672,7 @@ async function innerSend() {
         const lt = $('innerMsgs')._lastTool;
         if (lt && lt._res) {
           if (!ev.ok) lt.classList.add('fail');
-          lt._res.textContent = `${ev.ok ? '✓' : '✗'} ${ev.ms}ms：${ev.result}`;
+          lt._res.innerHTML = `<div class="tc-res-status">${ev.ok ? '✓' : '✗'} ${ev.ms}ms</div><div class="tc-res-content">${esc(ev.result)}</div>`;
           scrollBottom('innerMsgs');
         }
       }
