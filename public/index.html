@@ -304,7 +304,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.3.1';
+const PAGE_VERSION = '0.3.2';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }

@@ -110,7 +110,7 @@ async function main() {
     assert.ok((await plugins.runPlugin('skill', { action: 'save', name: '../bad', content: 'x' }, ctx)).includes('不合法'));
   });
 
-  const { sanitizeToolArguments } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls } = require(path.join(ROOT, 'lib', 'inner'));
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
     assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));
@@ -122,6 +122,38 @@ async function main() {
     assert.equal(sanitizeToolArguments(null), '{}');
     const legal = '{"path":"a"}';
     assert.equal(sanitizeToolArguments(legal), legal); // 合法原样
+  });
+  await t('reassemble：残桶（无 id/name）并入前一桶（agnes 拆流修复）', () => {
+    // 复现线上拆流：index 0 = 合法前半 JSON，index 1 = 无 id/name 的后半片段
+    const m = new Map();
+    m.set(0, { id: 'call-1', name: 'write', args: '{"path": "game.html", "content": "<html>' });
+    m.set(1, { id: '', name: '', args: 'body>ok</body></html>"}' });
+    const out = reassembleCalls(m);
+    assert.equal(out.length, 1, '应融合为单次调用：' + JSON.stringify(out));
+    assert.equal(out[0].name, 'write');
+    assert.equal(JSON.parse(out[0].args).path, 'game.html');
+  });
+  await t('reassemble：两桶各自合法 = 两次独立调用', () => {
+    const m = new Map();
+    m.set(0, { id: 'a', name: 'read', args: '{"path": "x"}' });
+    m.set(1, { id: 'b', name: 'read', args: '{"path": "y"}' });
+    const out = reassembleCalls(m);
+    assert.equal(out.length, 2);
+  });
+  await t('reassemble：多桶全坏时兜底顺序拼接', () => {
+    const m = new Map();
+    m.set(0, { id: 'call-1', name: 'write', args: '{"path": "a.html", "content": "1' });
+    m.set(1, { id: 'call-2', name: '', args: '2' });
+    m.set(2, { id: '', name: '', args: '3"}' });
+    const out = reassembleCalls(m);
+    assert.equal(out.length, 1, '应兜底拼为单次调用');
+    assert.equal(JSON.parse(out[0].args).content, '123');
+  });
+  await t('reassemble：全坏且拼接也失败 → 降级空参（由必填校验反馈重试）', () => {
+    const m = new Map();
+    m.set(0, { id: 'a', name: 'write', args: '{broken' });
+    const out = reassembleCalls(m);
+    assert.equal(out[0].args, '{}');
   });
   await t('runPlugin：缺必填参数返回可重试错误（不再 EISDIR）', async () => {
     const out = await plugins.runPlugin('write', {}, ctx); // 复现线上事故：LLM 空参调 write

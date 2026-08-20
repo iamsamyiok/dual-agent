@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.3.2';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -121,6 +121,15 @@ async function opencodeRunner() {
   return ocCache.runner;
 }
 
+// 内层系统提示：针对真实模型实测暴露的三类问题（并行调用丢参数、超长参数传输截断、oldText 凭记忆编写）
+const INNER_SYSTEM_PROMPT = [
+  '你是内层执行 Agent，通过调用插件完成任务，完成后用简洁中文总结。',
+  '调用规则：',
+  '1. 每次工具调用都必须完整提供所有必填参数；同一轮并行发起多个调用时，path 等参数每次都要单独带上，不能省略或依赖上一条。',
+  '2. edit 的 oldText 必须先用 read 读取文件后从返回内容逐字符复制（含空格缩进），不能凭记忆编写。',
+  '3. 单次 write 的内容过长可能在传输中被截断：超过约 6000 字符时，先写文件前半部分，再用 edit 在文件末尾追加后半部分，分多次完成。'
+].join('\n');
+
 // 执行互斥：同一时刻只允许一路内层 / 一路外层（防止并发 SSE 交叉写坏会话状态）
 let innerLock = false;
 let outerLock = false;
@@ -224,6 +233,9 @@ const server = http.createServer(async (req, res) => {
       const send = sse(req, res);
       send({ type: 'start' });
       const WS_DIR = workspaceDir();
+      // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）
+      if (innerMessages[0] && innerMessages[0].role === 'system') innerMessages[0].content = INNER_SYSTEM_PROMPT;
+      else innerMessages.unshift({ role: 'system', content: INNER_SYSTEM_PROMPT });
       innerMessages.push({ role: 'user', content: message });
       persistInnerMessages();
       const callPlugin = async (name, args) => {
@@ -253,7 +265,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (p === '/api/inner/messages' && req.method === 'GET') {
-      json(res, 200, { success: true, messages: innerMessages.slice(-60) });
+      json(res, 200, { success: true, messages: innerMessages.filter(m => m.role !== 'system').slice(-60) });
       return;
     }
     if (p === '/api/inner/reset' && req.method === 'POST') {
