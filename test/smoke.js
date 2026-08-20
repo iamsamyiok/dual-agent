@@ -110,7 +110,7 @@ async function main() {
     assert.ok((await plugins.runPlugin('skill', { action: 'save', name: '../bad', content: 'x' }, ctx)).includes('不合法'));
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT } = require(path.join(ROOT, 'lib', 'inner'));
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
     assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));
@@ -155,6 +155,35 @@ async function main() {
     const out = reassembleCalls(m);
     assert.equal(out[0].args, '{}');
   });
+  await t('reassemble：raw 全空的桶带 emptyRaw 标记（API 丢参数 → 精准重试提示）', () => {
+    const m = new Map();
+    m.set(0, { id: 'a', name: 'write', args: '' });
+    m.set(1, { id: 'b', name: 'write', args: '{"path":"x","content":"y"}' });
+    const out = reassembleCalls(m);
+    assert.equal(out.length, 2);
+    assert.equal(out[0].emptyRaw, true);
+    assert.ok(!out[1].emptyRaw);
+  });
+  await t('止损：同插件连续失败 STALL_LIMIT 次后跳过，成功则清零', () => {
+    assert.equal(STALL_LIMIT, 3);
+    const rf = new Map();
+    assert.ok(!shouldStall(rf, 'bash')); // 未失败不触发
+    recordFail(rf, 'bash', false); recordFail(rf, 'bash', false);
+    assert.ok(!shouldStall(rf, 'bash')); // 2 次未达阈值
+    recordFail(rf, 'bash', false);
+    assert.ok(shouldStall(rf, 'bash')); // 3 次触发
+    recordFail(rf, 'bash', true); // 成功清零
+    assert.ok(!shouldStall(rf, 'bash'));
+    // 不同插件独立计数
+    recordFail(rf, 'write', false);
+    assert.ok(!shouldStall(rf, 'write'));
+    assert.ok(!shouldStall(rf, 'bash'));
+    // 跨轮累计：跨轮状态保留（failStreak 是跨轮 Map），模拟两轮各失败一次后第三轮触发
+    recordFail(rf, 'read', false);
+    recordFail(rf, 'read', false);
+    recordFail(rf, 'read', false);
+    assert.ok(shouldStall(rf, 'read'));
+  });
   await t('runPlugin：缺必填参数返回可重试错误（不再 EISDIR）', async () => {
     const out = await plugins.runPlugin('write', {}, ctx); // 复现线上事故：LLM 空参调 write
     assert.ok(out.includes('调用被拒绝') && out.includes('path'), out);
@@ -169,6 +198,42 @@ async function main() {
     assert.ok(w.includes('是目录'), w);
     const r = await plugins.runPlugin('read', { path: '.' }, ctx);
     assert.ok(r.includes('是目录') || r.includes('目录'), r);
+  });
+  await t('write append：分段追加与新建文件', async () => {
+    await plugins.runPlugin('write', { path: 'long-doc.md', content: 'AAA' }, ctx);
+    const a1 = await plugins.runPlugin('write', { path: 'long-doc.md', content: 'BBB', append: true }, ctx);
+    assert.ok(a1.includes('已追加') && a1.includes('BBB'), a1);
+    const a2 = await plugins.runPlugin('write', { path: 'fresh.md', content: 'NEW', append: true }, ctx); // 不存在则新建
+    assert.ok(a2.includes('新建'), a2);
+    const readBack = await plugins.runPlugin('read', { path: 'long-doc.md' }, ctx);
+    assert.ok(readBack.includes('AAABBB'), readBack);
+  });
+  await t('write 覆盖保护：大文件覆盖需 confirm，append 不受限', async () => {
+    const big = 'X'.repeat(300);
+    await plugins.runPlugin('write', { path: 'protect.md', content: big }, ctx);
+    const w1 = await plugins.runPlugin('write', { path: 'protect.md', content: 'short' }, ctx); // 小内容覆盖大文件 → 拒绝
+    assert.ok(/^插件 write 执行出错/.test(w1) && w1.includes('append=true') && w1.includes('confirm=true'), w1);
+    const w2 = await plugins.runPlugin('write', { path: 'protect.md', content: 'new-full' + big, confirm: true }, ctx); // 确认后允许
+    assert.ok(w2.includes('已覆盖'), w2);
+    const w3 = await plugins.runPlugin('write', { path: 'protect.md', content: '+tail', append: true }, ctx); // append 畅通
+    assert.ok(w3.includes('已追加'), w3);
+    const w4 = await plugins.runPlugin('write', { path: 'small.md', content: '首次小文件' }, ctx); // 覆盖/写入小文件（<200 字符）不受限
+    assert.ok(w4.includes('已写入'), w4);
+  });
+  await t('read tail/offset：读末尾与分段（不回传全文）', async () => {
+    await plugins.runPlugin('write', { path: 'big.txt', content: 'x'.repeat(5000) + 'TAIL_MARKER' }, ctx);
+    const tl = await plugins.runPlugin('read', { path: 'big.txt', tail: 100 }, ctx);
+    assert.ok(tl.includes('TAIL_MARKER') && tl.length < 500, tl.length + ' 字符'); // 未包含 5000 个 x
+    const seg = await plugins.runPlugin('read', { path: 'big.txt', offset: 0, limit: 10 }, ctx);
+    assert.ok(/第 0-10\/\d+ 字符/.test(seg) && seg.includes('offset=10'), seg);
+    const over = await plugins.runPlugin('read', { path: 'big.txt', offset: 99999 }, ctx);
+    assert.ok(over.includes('执行出错') && over.includes('超出'), over);
+  });
+  await t('软失败统一 throw：read 不存在文件标记为失败（防模型误读成功）', async () => {
+    const r = await plugins.runPlugin('read', { path: 'no-such-file.txt' }, ctx);
+    assert.ok(/^插件 read 执行出错/.test(r), r); // 框架前缀 → ok=false
+    const m = await plugins.runPlugin('memory', { action: 'search', query: '' }, ctx);
+    assert.ok(/^插件 memory 执行出错/.test(m), m);
   });
 
   const approval = require(path.join(ROOT, 'lib', 'approval'));

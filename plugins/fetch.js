@@ -43,7 +43,7 @@ module.exports = {
       return `HTTP ${resp.status} ${ct}\n${text || '（无内容）'}`;
     } catch (e) {
       const msg = e && e.name === 'AbortError' ? '请求超时（15 秒）' : String((e && e.message) || e);
-      return `抓取失败：${msg}`;
+      throw new Error(msg);
     } finally {
       clearTimeout(timer);
     }

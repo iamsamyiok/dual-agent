@@ -28,7 +28,7 @@ module.exports = {
     type: 'object',
     properties: {
       action: { type: 'string', enum: ['add', 'list', 'toggle', 'clear'], description: '操作：add 添加 / list 列出 / toggle 勾选 / clear 清理' },
-      text: { type: 'string', description: 'add 时必填：任务描述（一句话）' },
+      text: { type: 'string', description: 'add 时必填：任务描述（参数名必须是 text，不能写成 content）' },
       id: { type: 'number', description: 'toggle 时必填：任务 id' },
       mode: { type: 'string', enum: ['done', 'all'], description: 'clear 可选：done 只清已完成（默认），all 清空' }
     },
@@ -37,8 +37,8 @@ module.exports = {
   run: async (args, ctx) => {
     const arr = load(ctx);
     if (args.action === 'add') {
-      const text = String(args.text || '').trim();
-      if (!text) return '添加失败：text 为空';
+      const text = String(args.text || args.content || '').trim(); // 兼容 content 别名（模型常用）
+      if (!text) throw new Error('text 为空（任务描述请放在 text 参数里）');
       const item = { id: (arr.length ? arr[arr.length - 1].id : 0) + 1, text: text.slice(0, 300), done: false };
       arr.push(item);
       store(ctx, arr);
@@ -48,7 +48,7 @@ module.exports = {
     if (args.action === 'toggle') {
       const id = Number(args.id);
       const t = arr.find(x => x.id === id);
-      if (!t) return `勾选失败：#${id} 不存在`;
+      if (!t) throw new Error(`#${id} 不存在`);
       t.done = !t.done;
       store(ctx, arr);
       return `#${id} 已标记为${t.done ? '完成' : '未完成'}\n${fmt(arr)}`;
@@ -59,6 +59,6 @@ module.exports = {
       store(ctx, left);
       return `已清理 ${arr.length - left.length} 项已完成任务，剩 ${left.length} 项`;
     }
-    return `未知操作：${args.action}`;
+    throw new Error(`未知操作：${args.action}（支持 add/list/toggle/clear）`);
   }
 };

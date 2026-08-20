@@ -46,7 +46,7 @@ module.exports = {
     const arr = load(ctx);
     if (args.action === 'save') {
       const content = String(args.content || '').trim();
-      if (!content) return '保存失败：content 为空';
+      if (!content) throw new Error('content 为空');
       const item = { id: (arr.length ? arr[arr.length - 1].id : 0) + 1, ts: Date.now(), content: content.slice(0, 2000), tags: (args.tags || []).map(String).slice(0, 8) };
       arr.push(item);
       save(ctx, arr);
@@ -54,7 +54,7 @@ module.exports = {
     }
     if (args.action === 'search') {
       const q = String(args.query || '').trim().toLowerCase();
-      if (!q) return '检索失败：query 为空';
+      if (!q) throw new Error('query 为空');
       const hit = arr.filter(m => m.content.toLowerCase().includes(q) || (m.tags || []).some(t => String(t).toLowerCase().includes(q)));
       if (!hit.length) return `没有匹配「${args.query}」的记忆`;
       return `匹配 ${hit.length} 条（新→旧）：\n\n${hit.slice(-10).reverse().map(fmt).join('\n\n')}`;
@@ -66,7 +66,7 @@ module.exports = {
     if (args.action === 'delete') {
       const id = Number(args.id);
       const i = arr.findIndex(m => m.id === id);
-      if (i < 0) return `删除失败：#${id} 不存在`;
+      if (i < 0) throw new Error(`#${id} 不存在`);
       arr.splice(i, 1);
       save(ctx, arr);
       return `已删除 #${id}`;

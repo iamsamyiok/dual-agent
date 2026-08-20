@@ -39,25 +39,25 @@ module.exports = {
       return `共 ${files.length} 个技能：\n${lines.join('\n')}`;
     }
     const name = String(args.name || '').trim();
-    if (!NAME_RE.test(name)) return `技能名不合法（小写字母/数字/连字符）：${name || '(空)'}`;
+    if (!NAME_RE.test(name)) throw new Error(`技能名不合法（限小写字母/数字/连字符）：${name || '(空)'}`);
     const fp = skillFile(ctx, name);
     if (args.action === 'save') {
       const content = String(args.content || '').trim();
-      if (!content) return '保存失败：content 为空';
+      if (!content) throw new Error('content 为空');
       const existed = fs.existsSync(fp);
       fs.mkdirSync(skillDir(ctx), { recursive: true });
       fs.writeFileSync(fp, content, 'utf8');
       return `${existed ? '已更新' : '已保存'}技能 ${name}（${content.length} 字符）`;
     }
     if (args.action === 'get') {
-      if (!fs.existsSync(fp)) return `技能 ${name} 不存在，可先 list 查看已有技能`;
+      if (!fs.existsSync(fp)) throw new Error(`技能 ${name} 不存在，可先 action=list 查看已有技能`);
       return fs.readFileSync(fp, 'utf8');
     }
     if (args.action === 'delete') {
-      if (!fs.existsSync(fp)) return `技能 ${name} 不存在`;
+      if (!fs.existsSync(fp)) throw new Error(`技能 ${name} 不存在`);
       fs.unlinkSync(fp);
       return `已删除技能 ${name}`;
     }
-    return `未知操作：${args.action}`;
+    throw new Error(`未知操作：${args.action}（支持 list/save/get/delete）`);
   }
 };
