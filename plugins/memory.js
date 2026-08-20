@@ -63,12 +63,14 @@ module.exports = {
         return '会话级记忆由框架自动管理，无需手动保存';
       }
       
-      // 去重检查：搜索是否已存在相似内容（前30字匹配 + 关键标签）
-      const dedupKey = content.slice(0, 30);
+      // 去重检查：搜索是否已存在相似内容（前50字模糊匹配 + 关键标签）
+      const checkContent = content.slice(0, 50);
       const checkLevel = level === 'long' ? 'long' : 'short';
       const existing = loadJSON(files[checkLevel], []).filter(m => {
-        // 精确匹配前30字
-        if (m.content.slice(0, 30) === dedupKey) return true;
+        const existingContent = m.content.slice(0, 50);
+        // 模糊匹配：检查是否包含相同关键词
+        const checkWords = checkContent.split(/\s+/).filter(w => w.length > 2);
+        if (checkWords.some(w => existingContent.includes(w))) return true;
         // 标签完全匹配
         const existingTags = new Set(m.tags || []);
         const newTags = new Set(args.tags || []);
@@ -76,7 +78,30 @@ module.exports = {
         return false;
       });
       if (existing.length > 0) {
+        // 找到重复，返回现有ID
         return `记忆已存在（#${existing[0].id}），无需重复保存`;
+      }
+      
+      // 新增：保存到长期记忆时，检查是否已有相同标签的记忆，合并而非重复
+      if (level === 'long') {
+        const longMem = loadJSON(files.long, []);
+        const sameTagMem = longMem.filter(m => {
+          const existingTags = new Set(m.tags || []);
+          const newTags = new Set(args.tags || []);
+          return newTags.some(t => existingTags.has(t)) && m.content !== content;
+        });
+        if (sameTagMem.length > 0) {
+          // 更新现有记忆，而不是创建重复
+          const toUpdate = sameTagMem[0];
+          const arr = longMem.map(m => {
+            if (m.id === toUpdate.id) {
+              return { ...m, content: content.slice(0, 500), ts: Date.now() };
+            }
+            return m;
+          });
+          saveJSON(files.long, arr);
+          return `已更新长期记忆 #${toUpdate.id}：${content.slice(0, 50)}...`;
+        }
       }
       
       if (level === 'short') {
