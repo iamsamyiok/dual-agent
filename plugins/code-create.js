@@ -1,4 +1,4 @@
-// @name code.create
+// @name code-create
 // @desc 基于模板创建新文件
 // @essential false
 const fs = require('fs');

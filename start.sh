@@ -1,76 +1,31 @@
-#!/bin/bash
-# dual-agent 一键启动脚本（Linux/macOS）
-# 用法: ./start.sh 或 DUAL_AGENT_PORT=3800 ./start.sh
-
-set -e
-
-# 颜色输出
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
+#!/bin/sh
+# 一键启动（Linux/macOS）：代理绕过 → 挑空闲端口 → 前台起服务（就绪后自动打开浏览器）
+# 自定义起始端口：DUAL_AGENT_PORT=3800 ./start.sh
 cd "$(dirname "$0")" || exit 1
 
-echo -e "${GREEN}dual-agent 双层 Agent 自迭代系统${NC}"
-echo "================================"
+command -v node >/dev/null 2>&1 || { echo "未检测到 Node.js，请先安装 18+ 版本：https://nodejs.org/"; exit 1; }
 
-# 检查 Node.js
-if ! command -v node &>/dev/null; then
-    echo -e "${RED}[错误] 未检测到 Node.js${NC}"
-    echo "请先安装 Node.js 18+: https://nodejs.org/"
-    exit 1
-fi
+# 代理工具兼容（Clash 等）：仅本进程直连 localhost，不改系统设置
+export NO_PROXY=localhost,127.0.0.1
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy 2>/dev/null || true
 
-NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-if [ "$NODE_VERSION" -lt 18 ]; then
-    echo -e "${RED}[错误] Node.js 版本需 18+，当前: $(node -v)${NC}"
-    exit 1
-fi
-
-# 端口配置
 PORT="${DUAL_AGENT_PORT:-3788}"
-echo "端口: $PORT"
+TRIES=0
 
-# 检测并处理代理冲突
-check_proxy_conflict() {
-    local clash_ports="7890 7891 7892 7893 7894 7895"
-    for p in $clash_ports; do
-        if command -v lsof &>/dev/null; then
-            if lsof -i :$p &>/dev/null; then
-                echo -e "${YELLOW}[提示] 检测到 Clash 服务运行在端口 $p${NC}"
-                return 0
-            fi
-        elif command -v netstat &>/dev/null; then
-            if netstat -an | grep ":$p " | grep -q LISTEN; then
-                echo -e "${YELLOW}[提示] 检测到 Clash 服务运行在端口 $p${NC}"
-                return 0
-            fi
-        fi
-    done
-    return 1
-}
+while true; do
+  if node tools/probe.js "$PORT" free >/dev/null 2>&1; then break; fi
+  # 端口有响应：若已是本程序在跑，直接开浏览器复用
+  if node tools/probe.js "$PORT" ours >/dev/null 2>&1; then
+    echo "服务已在运行，打开 http://localhost:$PORT/"
+    (command -v xdg-open >/dev/null && xdg-open "http://localhost:$PORT/") || true
+    exit 0
+  fi
+  TRIES=$((TRIES + 1))
+  if [ "$TRIES" -gt 8 ]; then echo "端口 3788-3796 都被其他程序占用"; exit 1; fi
+  PORT=$((PORT + 1))
+done
 
-check_proxy_conflict || true
-
-# 检查端口是否被占用
-ifcommand -v lsof &>/dev/null; then
-    if lsof -i :$PORT &>/dev/null; then
-        echo -e "${YELLOW}[警告] 端口 $PORT 已被占用${NC}"
-        echo "如需使用其他端口: DUAL_AGENT_PORT=3800 ./start.sh"
-        read -p "按回车继续（将尝试使用现有进程）或 Ctrl+C 取消... " 2>/dev/null || true
-    fi
-elif command -v netstat &>/dev/null; then
-    if netstat -an | grep ":$PORT " | grep -q LISTEN; then
-        echo -e "${YELLOW}[警告] 端口 $PORT 已被占用${NC}"
-    fi
-fi
-
-echo ""
-echo -e "${GREEN}正在启动服务器...${NC}"
-echo "访问地址: http://localhost:$PORT"
-echo "按 Ctrl+C 停止服务器"
-echo ""
-
-# 启动服务器（前台运行，Ctrl+C 停止）
+echo "正在启动 dual-agent（端口 $PORT，就绪后自动打开浏览器）"
+echo "全部网页关闭且无任务执行时，约 1 分钟后自动退出；Ctrl+C 立即停止"
+# 前台运行：Ctrl+C 优雅退出
 exec node server.js --port "$PORT"

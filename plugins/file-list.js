@@ -1,4 +1,4 @@
-// @name file.list
+// @name file-list
 // @desc 列出目录内容
 // @essential false
 const fs = require('fs');

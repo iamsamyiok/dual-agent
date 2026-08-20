@@ -1,4 +1,4 @@
-// @name process.install
+// @name process-install
 // @desc 安装项目依赖包
 // @essential false
 const { exec } = require('child_process');

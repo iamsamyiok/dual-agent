@@ -1,4 +1,4 @@
-// @name process.test
+// @name process-test
 // @desc 运行项目测试
 // @essential false
 const { exec } = require('child_process');

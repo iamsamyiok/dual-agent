@@ -1,4 +1,4 @@
-// @name task.breakdown
+// @name task-breakdown
 // @desc 拆解复杂任务为子任务列表
 // @essential false
 module.exports = {

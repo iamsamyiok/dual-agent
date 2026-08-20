@@ -1,4 +1,4 @@
-// @name file.read
+// @name file-read
 // @desc 读取文件完整内容
 // @essential false
 const fs = require('fs');

@@ -1,4 +1,4 @@
-// @name code.analyze
+// @name code-analyze
 // @desc 分析代码质量
 // @essential false
 const fs = require('fs');

@@ -160,12 +160,31 @@ const INNER_SYSTEM_PROMPT = [
 let innerLock = false;
 let outerLock = false;
 
+// ---------- 网页在线检测与自动退出 ----------
+// 语义：任何 /api 请求都视为"网页还开着"（前端有 20s 轮询心跳）；
+// 网页关闭时前端用 sendBeacon 发 /api/bye 提前触发；全部网页关闭且
+// 无任务执行时，超过 IDLE_MS 无人访问即自动退出（DUAL_AGENT_AUTOSTOP=0 常驻）。
+const AUTOSTOP = process.env.DUAL_AGENT_AUTOSTOP !== '0';
+const IDLE_MS = Number(process.env.DUAL_AGENT_IDLE_MS) > 0 ? Number(process.env.DUAL_AGENT_IDLE_MS) : 60000;
+const BYE_GRACE_MS = Number(process.env.DUAL_AGENT_BYE_GRACE_MS) > 0 ? Number(process.env.DUAL_AGENT_BYE_GRACE_MS) : 25000; // bye 后宽限：默认大于前端轮询间隔 20s，多标签页时另一页的轮询会续命
+// 首次运行（未配置内层 API 且非演示模式）多给 4 分钟配置时间，避免向导没填完就被退出
+const _cfg0 = getConfig();
+let lastSeen = Date.now() + (!(_cfg0.inner.base_url && _cfg0.inner.api_key && _cfg0.inner.model) && process.env.DUAL_AGENT_MOCK !== '1' ? 4 * 60000 : 0);
+setInterval(() => {
+  if (!AUTOSTOP || innerLock || outerLock) return;
+  if (Date.now() - lastSeen > IDLE_MS) {
+    console.log(`网页已全部关闭且空闲超过 ${Math.round(IDLE_MS / 1000)} 秒，自动退出（DUAL_AGENT_AUTOSTOP=0 可常驻）`);
+    process.exit(0);
+  }
+}, 5000);
+
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const p = parsed.pathname;
 
   // ---------- 静态 ----------
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
+    lastSeen = Date.now(); // 打开/刷新页面也算在线
     fs.readFile(path.join(ROOT, 'public', 'index.html'), (e, d) => {
       if (e) { res.writeHead(404); res.end('Not Found'); return; }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -175,6 +194,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    // 网页关闭信号（sendBeacon）：把 lastSeen 拨回"IDLE_MS - 宽限"前，宽限内无新请求即退出
+    if (p === '/api/bye' && req.method === 'POST') {
+      lastSeen = Date.now() - IDLE_MS + BYE_GRACE_MS;
+      json(res, 200, { success: true });
+      return;
+    }
+    if (p.startsWith('/api/')) lastSeen = Date.now();
     // ---------- 健康/配置 ----------
     if (p === '/api/health' && req.method === 'GET') {
       const cfg = getConfig();
@@ -408,25 +434,31 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// 就绪后自动打开浏览器（一键启动体验；无头/CI 环境自动跳过，DUAL_AGENT_NO_BROWSER=1 显式关闭）
+function openBrowser(target) {
+  if (process.env.DUAL_AGENT_NO_BROWSER === '1') return;
+  if (process.platform === 'linux' && !process.env.DISPLAY) return;
+  const { exec } = require('child_process');
+  const cmd = process.platform === 'win32' ? `start "" "${target}"`
+    : process.platform === 'darwin' ? `open "${target}"`
+    : `xdg-open "${target}"`;
+  exec(cmd, { timeout: 8000 }, () => { /* 打不开不影响服务 */ });
+}
+
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`双层 Agent 自迭代系统已启动: http://localhost:${PORT}`);
+  const url0 = `http://localhost:${PORT}`;
+  console.log(`双层 Agent 自迭代系统已启动: ${url0}`);
   console.log(`工作区: ${currentWorkspace()}（${workspaceDir()}）`);
   if (process.env.DUAL_AGENT_MOCK === '1') console.log('演示模式：内层假 LLM + 外层假 opencode（不依赖真实 API）');
+  if (AUTOSTOP) console.log(`全部网页关闭且空闲超 ${Math.round(IDLE_MS / 1000)} 秒后自动退出（DUAL_AGENT_AUTOSTOP=0 可常驻）`);
+  openBrowser(url0);
 });
 
-// 优雅退出：网页关闭时进程自动退出
-process.on('SIGINT', () => {
-  console.log('\n收到中断信号，正在关闭服务器...');
-  server.close(() => {
-    console.log('服务器已关闭');
-    process.exit(0);
-  });
-});
-
-process.on('SIGTERM', () => {
-  console.log('\n收到终止信号，正在关闭服务器...');
-  server.close(() => {
-    console.log('服务器已关闭');
-    process.exit(0);
-  });
-});
+// 优雅退出：Ctrl+C / 关闭启动窗口；server.close 带 5 秒强制退出兜底（防 keep-alive 连接挂住）
+function shutdown(signal) {
+  console.log(`\n收到 ${signal}，正在关闭服务器...`);
+  const force = setTimeout(() => process.exit(0), 5000);
+  server.close(() => { clearTimeout(force); console.log('服务器已关闭'); process.exit(0); });
+}
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
