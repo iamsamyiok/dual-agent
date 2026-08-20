@@ -4,7 +4,16 @@
 const fs = require('fs');
 const path = require('path');
 
-const NAME_RE = /^[a-z0-9-]{1,40}$/;
+// 技能名支持中英文，文件名用 URL-safe slug（小写+连字符）
+const NAME_RE = /^[a-zA-Z0-9\u4e00-\u9fa5-]{1,40}$/;
+
+function toSlug(name) {
+  // 将中文转换为拼音风格的下划线分隔（简化版：直接用原字符，替换非法字符）
+  return name.toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^\w\u4e00-\u9fa5-]/g, '')
+    .slice(0, 40);
+}
 
 function skillDir(ctx) {
   return path.join(ctx.cwd, 'skills');
@@ -54,10 +63,12 @@ module.exports = {
     
     // ========== save ==========
     const name = String(args.name || '').trim();
+    if (!name) throw new Error('name 为空');
     if (!NAME_RE.test(name)) {
-      throw new Error(`技能名不合法（限小写字母/数字/连字符）：${name || '(空)'}`);
+      throw new Error(`技能名不合法（限 1-40 位字母/数字/中文/连字符）：${name}`);
     }
-    const fp = skillFile(ctx, name);
+    const slug = toSlug(name);
+    const fp = skillFile(ctx, slug);
     
     if (action === 'save') {
       const content = String(args.content || '').trim();
