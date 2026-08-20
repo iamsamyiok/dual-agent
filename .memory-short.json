@@ -1,1 +1,21 @@
-[]
+[
+ {
+  "id": 1,
+  "ts": 1787232819671,
+  "content": "创建了 React 计数器组件，使用 TypeScript",
+  "tags": [
+   "react",
+   "typescript"
+  ],
+  "taskId": null
+ },
+ {
+  "id": 2,
+  "ts": 1787232825704,
+  "content": "这是测试记忆内容",
+  "tags": [
+   "test"
+  ],
+  "taskId": null
+ }
+]

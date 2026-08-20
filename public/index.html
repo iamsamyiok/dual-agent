@@ -108,8 +108,9 @@
   .prop-card .pc-reason { color: #78350f; margin-top: 4px; }
   .prop-card pre { background: #fff; border: 1px solid #fde68a; border-radius: 6px; padding: 6px; margin-top: 6px; max-height: 140px; overflow: auto; font-size: 11px; }
 
-  /* 底部审批栏 */
-  #approvalBar { flex-shrink: 0; border-top: 2px solid #f59e0b; background: #fffbeb; }
+  /* 外层审批栏（放在外层编辑区下方，不干扰内层） */
+  #approvalBar { display: none; border-top: 2px solid #f59e0b; background: #fffbeb; }
+  #approvalBar.visible { display: block; }
   #approvalBar .ab-closed { height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 14px; cursor: pointer; }
   #approvalBar .ab-count { background: #f59e0b; color: #fff; border-radius: 10px; font-size: 11px; padding: 1px 8px; }
   #approvalBar .ab-title { font-weight: 600; color: #92400e; font-size: 12.5px; }
@@ -227,7 +228,6 @@
       </div>
       <div class="review-tip" id="reviewTip"></div>
       <div class="chat-body" id="outerMsgs">
-        <div class="msg assistant">我是外层迭代 Agent（opencode）。我会观察内层日志与插件状态，提出插件增删改建议——所有建议需你在底部审批栏批准后才会生效。</div>
       </div>
       <div class="busy-tip" id="outerBusy">分析中…</div>
       <div class="composer">
@@ -237,20 +237,20 @@
     </section>
   </main>
 
-  <!-- 底部：统一审批栏 -->
-  <div id="approvalBar">
-    <div class="ab-closed" onclick="toggleApprovalPanel()">
-      <span class="ab-count" id="abCount">0</span>
-      <span class="ab-title">待审批</span>
-      <span class="ab-empty" id="abEmpty">暂无待审批的修改建议（外层建议或历史详情会出现在这里）</span>
-      <span class="grow"></span>
-      <button class="ab-btn" onclick="event.stopPropagation();doRollback()">↩ 回滚最近修改</button>
-    </div>
-    <div id="approvalPanel"></div>
-  </div>
-
   <!-- 移动端面板切换按钮 -->
   <button class="mobile-toggle" id="mobileToggle" onclick="cyclePanel()" title="切换面板">☰</button>
+</div>
+
+<!-- 外层审批栏（放在外层编辑区下方） -->
+<div id="approvalBar">
+  <div class="ab-closed" onclick="toggleApprovalPanel()">
+    <span class="ab-count" id="abCount">0</span>
+    <span class="ab-title">待审批</span>
+    <span class="ab-empty" id="abEmpty">暂无待审批的修改建议</span>
+    <span class="grow"></span>
+    <button class="ab-btn" onclick="event.stopPropagation();doRollback()">↩ 回滚最近修改</button>
+  </div>
+  <div id="approvalPanel"></div>
 </div>
 
 <!-- 配置弹窗 -->
@@ -420,6 +420,7 @@ function renderPlugins() {
         <div class="pl-desc">${esc(p.status === 'broken' && p.err ? p.err.split('\n')[0] : (p.desc || '（无描述）'))}</div>
         ${p.status === 'broken' ? `<div class="pl-err" id="perr-${esc(p.name)}">${esc(p.err || '未知错误')}</div>` : ''}
         <div class="pl-ops">
+          <button class="mini-btn" onclick="aiFixPlugin('${esc(p.name)}')" title="使用外层 OpenCode AI 修复插件">AI 修复</button>
           <button class="mini-btn" onclick="openPluginEditor('${esc(p.name)}')">${p.status === 'broken' ? '修复' : '编辑'}</button>
           ${p.status === 'broken' ? `<button class="mini-btn" onclick="togglePlErr('${esc(p.name)}')">错误详情</button>` : `<button class="mini-btn" onclick="exportPlugin('${esc(p.name)}')">导出</button>`}
           <button class="mini-btn danger" onclick="delPlugin('${esc(p.name)}')">删除</button>
@@ -624,13 +625,91 @@ async function delPlugin(name) {
   if (d.success) { pluginData = d.plugins; renderPlugins(); toast('已删除'); }
 }
 
+// ==================== AI 修复插件 ====================
+async function aiFixPlugin(name) {
+  if (outerBusy) { toast('外层正在执行中，请稍候'); return; }
+  const code = pluginData.find(p => p.name === name)?.code || '';
+  const err = pluginData.find(p => p.name === name)?.err || '';
+  const prompt = `你是一个插件修复专家。请修复以下插件的问题：
+
+插件名称：${name}
+状态：${err ? '错误 - ' + err : '需要优化'}
+
+插件代码：
+\`\`\`javascript
+${code || '(代码为空)'}
+\`\`\`
+
+插件规范：
+1. 文件头注释格式必须使用 // 而非 #
+2. 必须导出 params（JSON Schema）和 run 函数
+3. run 函数签名：async (args, ctx) => string
+4. ctx.cwd 是当前工作区目录
+5. 返回值是字符串，会被显示给用户
+
+请返回完整的修复后代码，使用 \`\`\`javascript 代码块包裹。`;
+
+  outerBusy = true;
+  const input = $('outerInput');
+  const sendBtn = $('outerSendBtn');
+  input.disabled = true; sendBtn.disabled = true;
+  $('outerBusy').style.display = 'block';
+  input.value = prompt;
+
+  const ai = appendMsg('outerMsgs', 'assistant', '', '外层 OpenCode');
+  let cur = ai;
+  let lastText = '';
+
+  try {
+    await streamSSE('/api/outer/chat', { message: prompt }, ev => {
+      if (ev.type === 'text') { lastText = ev.text; cur = ensureLive(ai, 'assistant', '外层 OpenCode'); cur.textContent = ev.text; scrollBottom('outerMsgs'); }
+      else if (ev.type === 'notice') { appendMsg('outerMsgs', 'error', ev.content, ''); }
+      else if (ev.type === 'proposals') {
+        if (ev.count > 0) { $('approvalBar').classList.add('visible'); loadProposals(); }
+      }
+      else if (ev.type === 'error') { appendMsg('outerMsgs', 'error', ev.content, ''); }
+    });
+
+    // 提取修复后的代码
+    const codeMatch = lastText.match(/```javascript\s*([\s\S]*?)```/) || lastText.match(/```js\s*([\s\S]*?)```/) || lastText.match(/```([\s\S]*?)```/);
+    if (codeMatch) {
+      const fixedCode = codeMatch[1].trim();
+      if (fixedCode !== code) {
+        const apply = confirm(`外层已生成修复代码（${fixedCode.length} 字符），是否应用到插件 ${name}？\n\n批准后将在审批栏显示预览。`);
+        if (apply) {
+          await api('/api/plugins/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, code: fixedCode })
+          });
+          pluginData = await (await api('/api/plugins')).plugins || pluginData;
+          renderPlugins();
+          toast('插件已更新');
+        }
+      } else {
+        toast('代码未变化，无需更新');
+      }
+    } else {
+      toast('未解析到修复代码，请手动编辑');
+    }
+  } catch (e) {
+    appendMsg('outerMsgs', 'error', e.message, '');
+  } finally {
+    outerBusy = false;
+    input.disabled = false; sendBtn.disabled = false;
+    $('outerBusy').style.display = 'none';
+    input.value = '';
+    input.focus();
+  }
+}
+
 // ==================== 内层对话（中栏） ====================
 let innerBusy = false;
 // 恢复当前工作区的历史会话（重启/刷新/切换工作区后调用）
 async function loadInnerHistory() {
   const d = await api('/api/inner/messages');
   const box = $('innerMsgs');
-  box.innerHTML = '<div class="msg assistant">我是内层 Agent，通过插件（read / write / edit / bash / memory / skill 等业务插件）完成任务。执行过程中的每次插件调用都会记录日志，供外层观察。</div>';
+  box.innerHTML = '';
   for (const m of (d.messages || [])) {
     if (m.role === 'user') appendMsg('innerMsgs', 'user', m.content, '我');
     else if (m.role === 'assistant' && m.content) appendMsg('innerMsgs', 'assistant', m.content, '内层 Agent');
@@ -707,7 +786,7 @@ async function outerSend() {
       if (ev.type === 'text') { lastText = ev.text; cur = ensureLive(ai, 'assistant', '外层 OpenCode'); cur.textContent = ev.text; scrollBottom('outerMsgs'); }
       else if (ev.type === 'notice') { appendMsg('outerMsgs', 'error', ev.content, ''); }
       else if (ev.type === 'proposals') {
-        if (ev.count > 0) { toast(`外层提出 ${ev.count} 项修改建议，请在底部审批栏处理`); loadProposals(); }
+        if (ev.count > 0) { $('approvalBar').classList.add('visible'); loadProposals(); }
         else { const n = document.createElement('div'); n.className = 'msg assistant'; n.style.alignSelf = 'stretch'; n.style.background = '#f0fdf4'; n.textContent = '（本次回复未包含可解析的建议，或建议无效）'; $('outerMsgs').appendChild(n); }
       }
       else if (ev.type === 'error') { appendMsg('outerMsgs', 'error', ev.content, ''); }
