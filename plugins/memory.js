@@ -66,10 +66,15 @@ module.exports = {
       // 去重检查：搜索是否已存在相似内容（前30字匹配 + 关键标签）
       const dedupKey = content.slice(0, 30);
       const checkLevel = level === 'long' ? 'long' : 'short';
-      const existing = loadJSON(files[checkLevel], []).filter(m => 
-        m.content.slice(0, 30) === dedupKey ||
-        (m.tags || []).some(t => (args.tags || []).includes(t))
-      );
+      const existing = loadJSON(files[checkLevel], []).filter(m => {
+        // 精确匹配前30字
+        if (m.content.slice(0, 30) === dedupKey) return true;
+        // 标签完全匹配
+        const existingTags = new Set(m.tags || []);
+        const newTags = new Set(args.tags || []);
+        if (newTags.size > 0 && [...newTags].every(t => existingTags.has(t))) return true;
+        return false;
+      });
       if (existing.length > 0) {
         return `记忆已存在（#${existing[0].id}），无需重复保存`;
       }
