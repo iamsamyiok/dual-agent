@@ -71,6 +71,30 @@ function listWorkspaces() {
   return names.sort();
 }
 
+// ---------- 内层执行过程记录（workspaces/<ws>/process.md，按时间顺序记录完整过程） ----------
+// 聊天窗口只显示单行动态摘要；完整入参/完整结果/全文回复都落盘到这里，
+// 前端双击工具条在 /process 页实时查看（含执行中任务的增量刷新）。
+function processPath() { return path.join(workspaceDir(), 'process.md'); }
+function fmtClock(ts) { return new Date(ts).toTimeString().slice(0, 8); }
+function readProcess() {
+  try { return fs.readFileSync(processPath(), 'utf8'); } catch { return ''; }
+}
+function appendProcess(text) {
+  try {
+    const fp = processPath();
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    // 体量保护：超过 2MB 保留尾部 1MB（头部旧记录滚动淘汰）
+    try {
+      const st = fs.statSync(fp);
+      if (st.size > 2 * 1024 * 1024) {
+        const keep = fs.readFileSync(fp, 'utf8').slice(-1024 * 1024);
+        fs.writeFileSync(fp, keep.slice(keep.indexOf('\n---\n') >= 0 ? keep.indexOf('\n---\n') : 0));
+      }
+    } catch { /* 新文件 */ }
+    fs.appendFileSync(fp, text, 'utf8');
+  } catch { /* ignore */ }
+}
+
 // ---------- 内层运行日志（环形最近 200 条；单向同步给外层上下文） ----------
 function getInnerLog() {
   try { return JSON.parse(fs.readFileSync(INNER_LOG_PATH, 'utf8')); } catch { return []; }
@@ -193,6 +217,15 @@ const server = http.createServer(async (req, res) => {
     });
     return;
   }
+  if (req.method === 'GET' && p === '/process') {
+    lastSeen = Date.now();
+    fs.readFile(path.join(ROOT, 'public', 'process.html'), (e, d) => {
+      if (e) { res.writeHead(404); res.end('Not Found'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(d);
+    });
+    return;
+  }
 
   try {
     // 网页关闭信号（sendBeacon）：把 lastSeen 拨回"IDLE_MS - 宽限"前，宽限内无新请求即退出
@@ -286,6 +319,13 @@ const server = http.createServer(async (req, res) => {
       const send = sse(req, res);
       send({ type: 'start' });
       const WS_DIR = workspaceDir();
+      // 过程记录：任务头 + 待落盘的中间回复（text 快照式，工具调用前 flush 避免重复）
+      appendProcess(`\n---\n\n## ${fmtClock(Date.now())} 📋 任务\n\n${message}\n`);
+      let pendingText = '';
+      const flushText = () => {
+        if (pendingText.trim()) appendProcess(`\n### ${fmtClock(Date.now())} 💬 内层\n\n${pendingText.trim()}\n`);
+        pendingText = '';
+      };
       // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）
       if (innerMessages[0] && innerMessages[0].role === 'system') innerMessages[0].content = INNER_SYSTEM_PROMPT;
       else innerMessages.unshift({ role: 'system', content: INNER_SYSTEM_PROMPT });
@@ -298,6 +338,19 @@ const server = http.createServer(async (req, res) => {
       };
       try {
         await chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPlugin, ev => {
+          // 过程落盘（完整入参与全量结果；与聊天窗口的单行摘要互补）
+          if (ev.type === 'text') pendingText = ev.text;
+          else if (ev.type === 'tool_call') {
+            flushText();
+            let pretty = '';
+            try { pretty = JSON.stringify(ev.args, null, 2); } catch { pretty = String(ev.args); }
+            appendProcess(`\n### ${fmtClock(Date.now())} 🔧 ${ev.plugin}\n\n**入参**\n\n\`\`\`json\n${pretty}\n\`\`\`\n`);
+          } else if (ev.type === 'tool_result') {
+            appendProcess(`**结果** ${ev.ok ? '✓' : '✗'}（${ev.ms}ms）\n\n\`\`\`\n${String(ev.result)}\n\`\`\`\n`);
+          } else if (ev.type === 'error') {
+            flushText();
+            appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);
+          }
           if (ev.type === 'tool_result') {
             // 日志补记耗时
             const list = getInnerLog();
@@ -306,15 +359,24 @@ const server = http.createServer(async (req, res) => {
           }
           send(ev);
         });
+        flushText();
         persistInnerMessages();
         send({ type: 'done' });
       } catch (e) {
+        appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String((e && e.message) || e)}\n`);
         send({ type: 'error', content: String((e && e.message) || e) });
         send({ type: 'done' });
       } finally {
         innerLock = false;
         try { res.end(); } catch { /* closed */ }
       }
+      return;
+    }
+    // 过程文件内容（/process 页轮询拉取；执行中任务 mtime 变化时增量刷新）
+    if (p === '/api/process' && req.method === 'GET') {
+      let mtime = 0;
+      try { mtime = fs.statSync(processPath()).mtimeMs; } catch { /* 无文件 */ }
+      json(res, 200, { success: true, content: readProcess(), path: processPath(), mtime, running: innerLock });
       return;
     }
     if (p === '/api/inner/messages' && req.method === 'GET') {

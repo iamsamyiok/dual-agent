@@ -81,22 +81,26 @@
   .msg.error { align-self: stretch; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; max-width: 100%; }
   .msg .who { font-size: 10.5px; color: #9ca3af; margin-bottom: 3px; }
   .msg.user .who { color: #bfdbfe; }
-   .toolcard { align-self: stretch; max-width: 100%; border: 1px dashed #c7d2fe; background: #f8faff; border-radius: 8px; font-size: 11.5px; overflow: hidden; }
-   .toolcard .tc-head { color: #4338ca; font-family: Consolas, monospace; padding: 6px 10px; cursor: pointer; display: flex; align-items: center; gap: 6px; user-select: none; flex-wrap: wrap; }
-   .toolcard .tc-head:hover { background: #f0f4ff; }
-   .toolcard .tc-brief { color: #6b7280; font-size: 10.5px; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-   .toolcard .tc-result-brief { color: #059669; font-size: 10.5px; max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: sans-serif; }
-   .toolcard .tc-result-brief.fail { color: #b91c1c; }
-   .toolcard .tc-toggle { font-size: 10px; color: #6366f1; transition: transform 0.2s; display: inline-block; }
-   .toolcard .tc-toggle.collapsed { transform: rotate(-90deg); }
-   .toolcard .tc-args { color: #6b7280; font-family: Consolas, monospace; margin: 0 10px 6px; word-break: break-all; }
-   .toolcard .tc-body { padding: 0 10px 8px; }
+   /* 工具条：单行动态显示（双击在 /process 页看完整过程） */
+   .toolcard { align-self: stretch; max-width: 100%; border: 1px solid #dbe4ff; background: #f8faff; border-radius: 7px; font-size: 11.5px; overflow: hidden; }
+   .toolcard .tc-head { color: #4338ca; font-family: Consolas, monospace; padding: 4px 10px; cursor: pointer; display: flex; align-items: center; gap: 8px; user-select: none; white-space: nowrap; overflow: hidden; }
+   .toolcard .tc-head:hover { background: #eef2ff; }
+   .toolcard .tc-plugin { font-weight: 600; flex-shrink: 0; }
+   .toolcard .tc-brief { color: #6b7280; font-size: 11px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+   .toolcard .tc-status { margin-left: auto; flex-shrink: 0; font-size: 11px; color: #f59e0b; }
+   .toolcard .tc-status.ok { color: #10b981; }
+   .toolcard .tc-status.fail { color: #ef4444; }
+   .toolcard .tc-run-dot { width: 7px; height: 7px; border-radius: 50%; background: #f59e0b; flex-shrink: 0; animation: tcpulse 1s infinite; }
+   @keyframes tcpulse { 0%,100% { opacity: 1; } 50% { opacity: 0.2; } }
+   .toolcard.open .tc-run-dot { animation: none; background: #a5b4fc; }
+   .toolcard .tc-args { color: #6b7280; font-family: Consolas, monospace; margin: 4px 10px 2px; word-break: break-all; white-space: pre-wrap; }
+   .toolcard .tc-body { display: none; padding: 0 10px 8px; }
+   .toolcard.open .tc-body { display: block; }
    .toolcard .tc-res { color: #374151; font-size: 11px; }
-   .toolcard .tc-res-status { color: #6b7280; font-family: Consolas, monospace; margin-bottom: 4px; }
+   .toolcard .tc-res-status { color: #6b7280; font-family: Consolas, monospace; margin: 4px 0; }
    .toolcard .tc-res-content { white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
    .toolcard.fail { border-color: #fecaca; background: #fef8f8; }
    .toolcard.fail .tc-head { color: #b91c1c; }
-   .toolcard.collapsed .tc-body { display: none; }
   .composer { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #e5e7eb; flex-shrink: 0; }
   .composer input { flex: 1; border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; outline: none; }
   .composer input:focus { border-color: #3b82f6; }
@@ -209,6 +213,7 @@
         <span>内层 Agent</span>
         <span class="hint" id="innerModelTag"></span>
         <span class="grow" style="flex:1"></span>
+        <button class="mini-btn" onclick="window.open('/process','_blank')" title="新页打开完整执行过程（全部插件调用的完整入参与结果）">📜 过程</button>
         <button class="mini-btn" onclick="resetInnerChat()" title="清空当前工作区的内层会话">清空会话</button>
         <button class="toggle-btn" onclick="toggleCol('innerCol')" title="折叠/展开">✕</button>
       </div>
@@ -718,29 +723,37 @@ async function innerSend() {
       if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '内层 Agent'); cur.textContent = ev.text; scrollBottom('innerMsgs'); }
       else if (ev.type === 'tool_call') {
         const c = document.createElement('div');
-        c.className = 'toolcard collapsed';
-        // 参数摘要：折叠时也能在头部看到关键参数（如 path/command 前 60 字符）
+        c.className = 'toolcard';
+        // 单行动态条：🔧 插件名 + 参数摘要 + 状态（执行中 → ✓/✗ 耗时）；双击在 /process 页看完整过程
         let argBrief = '';
-        try { const a = ev.args || {}; const k = ['path', 'command', 'action', 'query', 'name'].find(x => a[x]); if (k) argBrief = String(a[k]).slice(0, 60); } catch { /* ignore */ }
-        c.innerHTML = `<div class="tc-head"><span class="tc-toggle collapsed">▼</span> 🔧 ${esc(ev.plugin)}${argBrief ? `<span class="tc-brief">${esc(argBrief)}</span>` : ''}</div><div class="tc-body"><div class="tc-args">入参：${esc(JSON.stringify(ev.args))}</div><div class="tc-res"></div></div>`;
-        c.querySelector('.tc-head').onclick = () => {
-          c.classList.toggle('collapsed');
-          c.querySelector('.tc-toggle').classList.toggle('collapsed');
+        try { const a = ev.args || {}; const k = ['path', 'command', 'action', 'query', 'name'].find(x => a[x]); if (k) argBrief = String(a[k]).slice(0, 70); } catch { /* ignore */ }
+        c.innerHTML = `<div class="tc-head" title="单击展开详情，双击打开完整过程页"><span class="tc-run-dot"></span><span class="tc-plugin">🔧 ${esc(ev.plugin)}</span>${argBrief ? `<span class="tc-brief">${esc(argBrief)}</span>` : ''}<span class="tc-status running">执行中</span></div><div class="tc-body"><div class="tc-args">入参：${esc(JSON.stringify(ev.args))}</div><div class="tc-res"></div></div>`;
+        const head = c.querySelector('.tc-head');
+        let clickTimer = null;
+        head.onclick = () => {
+          if (clickTimer) return; // 双击的第二次点击不触发展开
+          clickTimer = setTimeout(() => { c.classList.toggle('open'); clickTimer = null; }, 200);
+        };
+        head.ondblclick = () => {
+          if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+          window.open('/process', '_blank');
         };
         $('innerMsgs').appendChild(c); cur = null; scrollBottom('innerMsgs');
         c._res = c.querySelector('.tc-res');
+        c._status = c.querySelector('.tc-status');
         $('innerMsgs')._lastTool = c;
       }
       else if (ev.type === 'tool_result') {
         const lt = $('innerMsgs')._lastTool;
         if (lt && lt._res) {
-          if (!ev.ok) { lt.classList.add('fail'); lt.classList.remove('collapsed'); lt.querySelector('.tc-toggle').classList.remove('collapsed'); }
-          // 头部结果摘要：折叠状态下也能一眼看到结果/错误
-          const brief = document.createElement('span');
-          brief.className = 'tc-result-brief' + (ev.ok ? '' : ' fail');
-          brief.textContent = (ev.ok ? '✓ ' : '✗ ') + String(ev.result || '').slice(0, 80).replace(/\s+/g, ' ');
-          lt.querySelector('.tc-head').appendChild(brief);
-          lt._res.innerHTML = `<div class="tc-res-status">${ev.ok ? '✓' : '✗'} ${ev.ms}ms</div><div class="tc-res-content">${esc(ev.result)}</div>`;
+          if (!ev.ok) lt.classList.add('fail');
+          if (lt._status) {
+            lt._status.textContent = (ev.ok ? '✓ ' : '✗ ') + ev.ms + 'ms';
+            lt._status.className = 'tc-status ' + (ev.ok ? 'ok' : 'fail');
+          }
+          // 展开态详情显示前 600 字符（完整内容看 /process 过程页）
+          const brief = String(ev.result || '').slice(0, 600) + (String(ev.result || '').length > 600 ? '\n…（完整内容双击工具条查看过程页）' : '');
+          lt._res.innerHTML = `<div class="tc-res-status">${ev.ok ? '✓' : '✗'} ${ev.ms}ms</div><div class="tc-res-content">${esc(brief)}</div>`;
           scrollBottom('innerMsgs');
         }
       }

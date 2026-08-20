@@ -26,6 +26,19 @@ function saveJSON(fp, data) {
   fs.writeFileSync(fp, JSON.stringify(data, null, 1), 'utf8');
 }
 
+// tags 归一化：模型偶发传字符串（"['a','b']" 或 "a,b"），统一转字符串数组
+function normTags(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (Array.isArray(raw)) return raw.map(t => String(t).trim()).filter(Boolean);
+  const s = String(raw).trim();
+  if (!s) return [];
+  try {
+    const v = JSON.parse(s);
+    if (Array.isArray(v)) return v.map(t => String(t).trim()).filter(Boolean);
+  } catch { /* 继续分隔解析 */ }
+  return s.split(/[,;，；]\s*/).map(t => t.replace(/^['"\\[\\]]+|['"\\[\\]]+$/g, '').trim()).filter(Boolean);
+}
+
 module.exports = {
   params: {
     type: 'object',
@@ -52,6 +65,7 @@ module.exports = {
     const files = memFiles(ctx);
     const action = args.action;
     const level = args.level || 'short';
+    const tags = normTags(args.tags); // 字符串/数组归一化（模型常传字符串）
     
     // ========== save ==========
     if (action === 'save') {
@@ -73,7 +87,7 @@ module.exports = {
         if (checkWords.some(w => existingContent.includes(w))) return true;
         // 标签完全匹配
         const existingTags = new Set(m.tags || []);
-        const newTags = new Set(args.tags || []);
+        const newTags = new Set(tags);
         if (newTags.size > 0 && [...newTags].every(t => existingTags.has(t))) return true;
         return false;
       });
@@ -87,8 +101,8 @@ module.exports = {
         const longMem = loadJSON(files.long, []);
         const sameTagMem = longMem.filter(m => {
           const existingTags = new Set(m.tags || []);
-          const newTags = new Set(args.tags || []);
-          return newTags.some(t => existingTags.has(t)) && m.content !== content;
+          const newTags = new Set(tags);
+          return [...newTags].some(t => existingTags.has(t)) && m.content !== content;
         });
         if (sameTagMem.length > 0) {
           // 更新现有记忆，而不是创建重复
@@ -110,7 +124,7 @@ module.exports = {
           id: arr.length + 1,
           ts: Date.now(),
           content: content.slice(0, 500),
-          tags: (args.tags || []).slice(0, 3),
+          tags: tags.slice(0, 3),
           taskId: args.taskId || null
         };
         arr.push(item);
@@ -125,7 +139,7 @@ module.exports = {
           id: arr.length + 1,
           ts: Date.now(),
           content: content.slice(0, 1000),
-          tags: (args.tags || []).slice(0, 5),
+          tags: tags.slice(0, 5),
           priority: args.priority || 'normal'
         };
         arr.push(item);
