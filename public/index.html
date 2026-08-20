@@ -209,8 +209,14 @@
     <div class="m-body frm">
       <label>插件名（小写字母/数字/连字符）</label>
       <input id="peName" placeholder="如 fetch">
+      <div id="peTplRow" style="display:flex;gap:8px;align-items:center;margin:2px 0 6px">
+        <span style="font-size:12px;color:#888">从模板开始：</span>
+        <button class="mini-btn" onclick="usePluginTemplate('tool')">工具类</button>
+        <button class="mini-btn" onclick="usePluginTemplate('memory')">记忆类</button>
+        <button class="mini-btn" onclick="usePluginTemplate('skill')">技能类</button>
+      </div>
       <label>插件代码（注释头提供元信息，模板已预填）</label>
-      <textarea id="peCode" spellcheck="false"></textarea>
+      <textarea id="peCode" spellcheck="false" oninput="peDirty=true"></textarea>
     </div>
     <div class="m-foot">
       <button class="btn-no" onclick="closePluginEditor()">取消</button>
@@ -232,7 +238,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.1.0';
+const PAGE_VERSION = '0.2.0';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -311,32 +317,133 @@ function renderPlugins() {
   }
   el.innerHTML = html || '<div class="pl-group">（无插件）</div>';
 }
-const PLUGIN_TEMPLATE = [
-  '// @name my-plugin',
-  '// @desc 一句话描述插件功能',
-  '// @essential false',
-  '',
-  'module.exports = {',
-  '  params: {',
-  '    type: "object",',
-  '    properties: {',
-  '      input: { type: "string", description: "参数说明" }',
-  '    },',
-  '    required: ["input"]',
-  '  },',
-  '  run: async (args, ctx) => {',
-  '    return "结果：" + args.input;',
-  '  }',
-  '};',
-  ''
-].join('\n');
+// 三类插件模板：工具（函数调用）/ 记忆（跨会话状态）/ 技能（方法论沉淀）
+const PLUGIN_TEMPLATES = {
+  tool: [
+    '// @name my-tool',
+    '// @desc 一句话描述工具功能（内层 LLM 将看到本描述并按需调用）',
+    '// @essential false',
+    '',
+    'module.exports = {',
+    '  params: {',
+    '    type: "object",',
+    '    properties: {',
+    '      input: { type: "string", description: "参数说明" }',
+    '    },',
+    '    required: ["input"]',
+    '  },',
+    '  run: async (args, ctx) => {',
+    '    // ctx.cwd = 工作区目录；ctx.dataDir = 数据目录；返回值（字符串）回传给内层 LLM',
+    '    return "结果：" + args.input;',
+    '  }',
+    '};',
+    ''
+  ].join('\n'),
+  memory: [
+    '// @name my-memory',
+    '// @desc 跨会话持久记忆（读写 <数据目录>/my-memory.json，须带 load/save 辅助函数）',
+    '// @essential false',
+    "const fs = require('fs');",
+    "const path = require('path');",
+    '',
+    'function file(ctx) {',
+    '  return path.join(ctx.dataDir || ctx.cwd, "my-memory.json");',
+    '}',
+    'function load(ctx) {',
+    '  try { return JSON.parse(fs.readFileSync(file(ctx), "utf8")) || {}; } catch { return {}; }',
+    '}',
+    'function store(ctx, data) {',
+    '  fs.mkdirSync(path.dirname(file(ctx)), { recursive: true });',
+    '  fs.writeFileSync(file(ctx), JSON.stringify(data, null, 1), "utf8");',
+    '}',
+    '',
+    'module.exports = {',
+    '  params: {',
+    '    type: "object",',
+    '    properties: {',
+    '      action: { type: "string", enum: ["save", "search", "list", "delete"], description: "操作" },',
+    '      content: { type: "string", description: "save 时必填：要记住的内容" },',
+    '      query: { type: "string", description: "search 时必填：关键词" }',
+    '    },',
+    '    required: ["action"]',
+    '  },',
+    '  run: async (args, ctx) => {',
+    '    const data = load(ctx);',
+    '    data.items = data.items || [];',
+    '    if (args.action === "save") {',
+    '      data.items.push({ ts: Date.now(), content: String(args.content || "") });',
+    '      store(ctx, data);',
+    '      return "已记住";',
+    '    }',
+    '    if (args.action === "search") {',
+    '      const hit = data.items.filter(m => m.content.includes(args.query || ""));',
+    '      return hit.length ? hit.map(m => m.content).join("\\n") : "无匹配记忆";',
+    '    }',
+    '    return data.items.length ? data.items.map(m => m.content).join("\\n") : "记忆为空";',
+    '  }',
+    '};',
+    ''
+  ].join('\n'),
+  skill: [
+    '// @name my-skill',
+    '// @desc 技能库（markdown 方法论存于 <工作区>/my-skills/，须校验技能名防路径穿越）',
+    '// @essential false',
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const NAME_RE = /^[a-z0-9-]{1,40}$/;",
+    '',
+    'function dir(ctx) { return path.join(ctx.cwd, "my-skills"); }',
+    '',
+    'module.exports = {',
+    '  params: {',
+    '    type: "object",',
+    '    properties: {',
+    '      action: { type: "string", enum: ["save", "list", "get", "delete"], description: "操作" },',
+    '      name: { type: "string", description: "技能名（小写字母/数字/连字符）" },',
+    '      content: { type: "string", description: "save 时必填：技能全文（markdown 步骤）" }',
+    '    },',
+    '    required: ["action"]',
+    '  },',
+    '  run: async (args, ctx) => {',
+    '    if (args.action === "list") {',
+    '      let files = [];',
+    '      try { files = fs.readdirSync(dir(ctx)).filter(f => f.endsWith(".md")); } catch {}',
+    '      return files.length ? files.map(f => f.replace(/\\.md$/, "")).join("\\n") : "技能库为空";',
+    '    }',
+    '    const name = String(args.name || "");',
+    '    if (!NAME_RE.test(name)) return "技能名不合法";',
+    '    const fp = path.join(dir(ctx), name + ".md");',
+    '    if (args.action === "save") {',
+    '      fs.mkdirSync(dir(ctx), { recursive: true });',
+    '      fs.writeFileSync(fp, String(args.content || ""), "utf8");',
+    '      return "已保存技能 " + name;',
+    '    }',
+    '    if (args.action === "get") {',
+    '      return fs.existsSync(fp) ? fs.readFileSync(fp, "utf8") : "技能不存在";',
+    '    }',
+    '    if (args.action === "delete" && fs.existsSync(fp)) { fs.unlinkSync(fp); return "已删除"; }',
+    '    return "未知操作";',
+    '  }',
+    '};',
+    ''
+  ].join('\n')
+};
+let peDirty = false; // 用户已动手编辑则换模板前确认
 function openPluginEditor(name) {
   const p = name ? pluginData.find(x => x.name === name) : null;
   $('peTitle').textContent = p ? `编辑插件：${name}` : '新建插件';
   $('peName').value = p ? p.name : '';
   $('peName').disabled = !!p;
-  $('peCode').value = p ? p.code : PLUGIN_TEMPLATE;
+  $('peCode').value = p ? p.code : PLUGIN_TEMPLATES.tool;
+  $('peTplRow').style.display = p ? 'none' : 'flex';
+  peDirty = false;
   $('pluginMask').classList.add('show');
+}
+function usePluginTemplate(kind) {
+  if (peDirty && !confirm('当前代码将被模板覆盖，继续？')) return;
+  $('peCode').value = PLUGIN_TEMPLATES[kind];
+  peDirty = false;
+  $('peCode').focus();
 }
 function closePluginEditor() { $('pluginMask').classList.remove('show'); }
 async function savePluginUi() {

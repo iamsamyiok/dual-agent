@@ -33,10 +33,15 @@ DUAL_AGENT_MOCK=1 node server.js
 module.exports = {
   params: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
   run: async (args, ctx) => "返回字符串结果（回传给内层 LLM）"
+  // ctx.cwd = 工作区目录；ctx.dataDir = 数据目录
 };
 ```
 
-- 预装 4 个无特权基础插件：read / write / edit / bash，与业务插件同权限、同修改流程
+- 预装 6 个无特权基础插件：
+  - 工具类：read / write / edit / bash
+  - 记忆类：memory（内层跨会话持久记忆，save/search/list/delete，存 `.data/memory.json`）
+  - 技能类：skill（内层任务方法论沉淀，save/list/get/delete，markdown 存 `workspace/skills/`）
+- 前端「新建插件」提供三类模板（工具 / 记忆 / 技能），一键预填骨架代码
 - 热插拔：审批通过或手动保存后自动热加载（清 require 缓存），内层无需重启
 - 渐进式加载：启动仅加载 essential 插件；业务插件首次被调用时才加载代码
 
@@ -54,3 +59,6 @@ module.exports = {
 | PORT | 服务端口（默认 3788） |
 | DUAL_AGENT_MOCK=1 | 演示模式（假内层 LLM + 假外层 opencode） |
 | DUAL_AGENT_AUTO_APPROVE=0 | 关闭 opencode --auto（可能因权限询问卡住） |
+| DUAL_AGENT_OPENCODE_CMD | 显式指定 opencode 完整路径（Windows 检测失效时使用） |
+
+Windows 注意：npm 全局安装的 opencode 是 `.cmd` 垫片，程序会自动从 `where` 结果中优先选择可执行垫片并以 shell 方式启动；若仍失败，用 `DUAL_AGENT_OPENCODE_CMD` 指定完整路径。

@@ -83,12 +83,12 @@ function sse(req, res) {
 
 // 内层消息历史（内存，每会话一条链；demo 单会话）
 const innerMessages = [];
-// opencode 检测缓存
-let ocCache = { ts: 0, cmd: null };
-async function opencodeCmd() {
-  if (Date.now() - ocCache.ts < 10000) return ocCache.cmd;
-  ocCache = { ts: Date.now(), cmd: await outerMod.detectOpencode() };
-  return ocCache.cmd;
+// opencode 检测缓存（detectOpencode 返回 { cmd, shell } | null）
+let ocCache = { ts: 0, runner: null };
+async function opencodeRunner() {
+  if (Date.now() - ocCache.ts < 10000) return ocCache.runner;
+  ocCache = { ts: Date.now(), runner: await outerMod.detectOpencode() };
+  return ocCache.runner;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -109,12 +109,12 @@ const server = http.createServer(async (req, res) => {
     // ---------- 健康/配置 ----------
     if (p === '/api/health' && req.method === 'GET') {
       const cfg = getConfig();
-      const oc = await opencodeCmd();
+      const oc = await opencodeRunner();
       json(res, 200, {
         success: true, version: APP_VERSION,
         mock: process.env.DUAL_AGENT_MOCK === '1',
         innerConfigured: !!(cfg.inner.base_url && cfg.inner.api_key && cfg.inner.model),
-        opencode: oc || '', workspace: WORKSPACE_DIR
+        opencode: oc ? oc.cmd : '', workspace: WORKSPACE_DIR
       });
       return;
     }
@@ -161,7 +161,7 @@ const server = http.createServer(async (req, res) => {
       send({ type: 'start' });
       innerMessages.push({ role: 'user', content: message });
       const callPlugin = async (name, args) => {
-        const result = await plugins.runPlugin(name, args, { cwd: WORKSPACE_DIR });
+        const result = await plugins.runPlugin(name, args, { cwd: WORKSPACE_DIR, dataDir: DATA_DIR });
         appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错))/.test(result), result: String(result).slice(0, 400), ms: 0 });
         return result;
       };
@@ -190,9 +190,9 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const message = String(body.message || '').trim();
       if (!message) { json(res, 400, { success: false, error: '消息为空' }); return; }
-      const cmd = await opencodeCmd();
-      if (process.env.DUAL_AGENT_MOCK !== '1' && !cmd) {
-        json(res, 400, { success: false, error: '未检测到 opencode。安装：npm install -g opencode-ai，配置登录：opencode auth login' });
+      const runner = await opencodeRunner();
+      if (process.env.DUAL_AGENT_MOCK !== '1' && !runner) {
+        json(res, 400, { success: false, error: '未检测到 opencode。安装：npm install -g opencode-ai，配置登录：opencode auth login；也可在环境变量 DUAL_AGENT_OPENCODE_CMD 指定完整路径' });
         return;
       }
       const send = sse(req, res);
@@ -201,7 +201,7 @@ const server = http.createServer(async (req, res) => {
       const prompt = `${outerMod.SYSTEM_PROMPT}\n\n${outerMod.buildContext(plugins.listPlugins(), getInnerLog())}\n\n== 用户指令 ==\n${message}`;
       let fullText = '';
       try {
-        const r = await outerMod.runOuter(cmd, prompt, ROOT, ev => {
+        const r = await outerMod.runOuter(runner, prompt, ROOT, ev => {
           if (ev.type === 'text') { fullText = ev.text; send(ev); }
         });
         if (r.error) send({ type: 'error', content: r.error });
