@@ -235,6 +235,12 @@ async function main() {
     const m = await plugins.runPlugin('memory', { action: 'search', query: '' }, ctx);
     assert.ok(/^插件 memory 执行出错/.test(m), m);
   });
+  await t('bash 重定向无输出时给确认提示（外层 Agent 建议的改进）', async () => {
+    const r = await plugins.runPlugin('bash', { command: 'echo x >> redirect-test.txt' }, ctx);
+    assert.ok(r.includes('重定向到文件') && r.includes('wc -c'), r);
+    const n = await plugins.runPlugin('bash', { command: 'echo normal-output' }, ctx);
+    assert.ok(!n.includes('重定向到文件'), n);
+  });
 
   const approval = require(path.join(ROOT, 'lib', 'approval'));
   let badId = '', warnId = '';

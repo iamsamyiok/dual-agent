@@ -29,7 +29,11 @@ module.exports = {
         const tail = (out + (out && errOut ? '\n' : '') + errOut).slice(-6000);
         if (err && err.killed) resolve(`命令超时被终止（30 秒）。部分输出：\n${tail}`);
         else if (err) resolve(`命令退出码 ${err.code ?? '?'}。输出：\n${tail || '（无输出）'}`);
-        else resolve(`命令执行成功（退出码 0）。输出：\n${tail || '（无输出）'}`);
+        // 重定向无输出命令：返回确认提示（外层 Agent 观察内层日志后建议补充，
+        // 实测模型追加后无法判断是否成功，频繁补 wc -c）
+        else if (!tail && /(>>|>|tee)\s+\S+/.test(cmd)) {
+          resolve(`命令执行成功（退出码 0），无终端输出（内容可能已重定向到文件）。如需确认追加/写入是否生效：wc -c <文件> 或 ls -l <文件>`);
+        } else resolve(`命令执行成功（退出码 0）。输出：\n${tail || '（无输出）'}`);
       });
     });
   }
