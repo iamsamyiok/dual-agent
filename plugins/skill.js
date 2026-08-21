@@ -191,21 +191,22 @@ module.exports = {
       let resDir = '';
       if (found.kind === 'dir') {
         // 框架自动扫描捆绑资源，生成可直接照抄的 skill: 路径清单（把"按正文引用读文件"变成具体行动项）
+        // 每行同时给绝对路径：bash 执行脚本（python3/node/sh）时用 → 后的路径（bash 无法解析 skill: 协议）
         const skillDir = path.dirname(found.entry);
         const files = [];
         (function walk(dir, rel) {
           let entries = [];
           try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
           for (const e of entries) {
-            if (e.name === 'SKILL.md' || e.name.startsWith('.')) continue;
+            if (e.name === 'SKILL.md' || e.name.startsWith('.') || e.name === '__pycache__' || e.name.endsWith('.pyc')) continue;
             const p2 = path.join(dir, e.name);
             const r2 = rel ? `${rel}/${e.name}` : e.name;
             if (e.isDirectory()) walk(p2, r2);
-            else files.push({ rel: r2, size: fs.statSync(p2).size });
+            else files.push({ rel: r2, abs: p2, size: fs.statSync(p2).size });
           }
         })(skillDir, '');
-        const list = files.map(f => `  - skill:${found.name}/${f.rel}（${f.size} 字节）`).join('\n');
-        resDir = `【目录型技能】捆绑资源清单（read 插件直接用下列 path 读取；正文引用其中文件时必须先读再用，禁止跳过或凭空自造替代）：\n${list || '  （无捆绑文件）'}\n\n`;
+        const list = files.map(f => `  - skill:${found.name}/${f.rel} → ${f.abs}（${f.size} 字节）`).join('\n');
+        resDir = `【目录型技能】捆绑资源清单（read 用 skill: 前缀；bash 执行用 → 后的绝对路径；正文引用其中文件时必须先读再用，禁止跳过或凭空自造替代）：\n${list || '  （无捆绑文件）'}\n\n`;
       }
       return `${resDir}${text}`;
     }

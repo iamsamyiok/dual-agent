@@ -223,6 +223,18 @@ async function main() {
     assert.ok(/ word…$/.test(line), '截断应落在完整词后（不切词一半）：...' + line.slice(-40));
     fs.rmSync(skDir, { recursive: true, force: true });
   });
+  await t('skill 插件：get 资源清单含 bash 可用绝对路径（脚本类技能执行入口）', async () => {
+    const skDir = path.join(WS, 'skills', 'script-demo');
+    fs.mkdirSync(path.join(skDir, 'scripts', '__pycache__'), { recursive: true });
+    fs.writeFileSync(path.join(skDir, 'SKILL.md'), '---\nname: script-demo\ndescription: 脚本技能\n---\n\n# 正文', 'utf8');
+    fs.writeFileSync(path.join(skDir, 'scripts', 'run.py'), 'print(1)', 'utf8');
+    fs.writeFileSync(path.join(skDir, 'scripts', '__pycache__', 'run.cpython-311.pyc'), 'bin', 'utf8');
+    try {
+      const get = await plugins.runPlugin('skill', { action: 'get', name: 'script-demo' }, ctx);
+      assert.ok(get.includes(`skill:script-demo/scripts/run.py → ${path.join(WS, 'skills', 'script-demo', 'scripts', 'run.py')}`), '清单应同时给 skill: 路径与绝对路径');
+      assert.ok(!get.includes('__pycache__') && !get.includes('.pyc'), '应过滤 __pycache__/.pyc');
+    } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
+  });
   await t('skill 插件：多行 YAML frontmatter（折叠/字面/续行）零适配解析', async () => {
     const skDir = path.join(WS, 'skills', 'multi-line-demo');
     fs.mkdirSync(skDir, { recursive: true });
