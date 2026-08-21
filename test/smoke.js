@@ -269,7 +269,7 @@ async function main() {
     } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg } = require(path.join(ROOT, 'lib', 'inner'));
   const { preflight, pluginScores } = require(path.join(ROOT, 'lib', 'regression'));
   await t('regression 预检：坏结构插件被拦截（params/run 缺失、第三方模块、语法错）', async () => {
     const bad = await preflight([{ action: 'create', plugin: 't-bad', code: 'module.exports = { run: "x" };' }]);
@@ -410,6 +410,119 @@ async function main() {
     assert.ok(!isRetryableStatus(400) && !isRetryableStatus(404) && !isRetryableStatus(500));
     assert.ok(isRateLimitText('Rate limit reached') && isRateLimitText('请求过多，请稍后再试'));
     assert.ok(!isRateLimitText('invalid api key'));
+  });
+
+  // ===== token 计量机制（v0.9.0 四层改造）=====
+  await t('estimateTokens：CJK ×1 + 其余 ceil/4 折算', () => {
+    assert.equal(estimateTokens('你好'), 2, '2 个 CJK = 2 tok');
+    assert.equal(estimateTokens('abcdefgh'), 2, '8 ASCII / 4 = 2');
+    assert.equal(estimateTokens('abcdefg'), 2, 'ceil(7/4) = 2');
+    assert.equal(estimateTokens('你a'), 2, '1 CJK + ceil(1/4)=1');
+    assert.equal(estimateTokens(''), 0);
+  });
+  await t('usageNoteMsg：注记为 system 角色且含累计与口径指引', () => {
+    const m = usageNoteMsg({ prompt: 800, completion: 30, cached: 200 }, { calls: 3, prompt: 2400, completion: 90, cached: 600 }, 12345);
+    assert.equal(m.role, 'system', '注记角色必须是 system（注入发送副本末尾）');
+    assert.ok(m.content.includes('2400') && m.content.includes('3 次调用'), '含会话累计');
+    assert.ok(m.content.includes('缓存命中 600'), '含缓存累计');
+    assert.ok(m.content.includes('usage 插件'), '指引插件查询');
+    assert.ok(m.content.includes('禁止自行估算'), '禁止脑补口径声明');
+  });
+  // mock SSE 响应构造：一次 enqueue 全部 data 行（解析器按 \n 切分，单块即可覆盖缓冲逻辑）
+  const sseResponse = (lines) => {
+    const body = lines.map(l => `data: ${l}\n\n`).join('');
+    const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(body)); c.close(); } });
+    return new Response(stream, { status: 200 });
+  };
+  await t('计量采集：捕获 choices 空+usage 末帧（旧版此处被 continue 丢弃）', async () => {
+    const origFetch = globalThis.fetch;
+    const bodies = [];
+    globalThis.fetch = async (u, init) => {
+      bodies.push(JSON.parse(init.body));
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: '你好世界' } }] }),
+        JSON.stringify({ choices: [], usage: { prompt_tokens: 1200, completion_tokens: 36, prompt_tokens_details: { cached_tokens: 800 } } }),
+        '[DONE]'
+      ]);
+    };
+    try {
+      const events = [];
+      const out = await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: 'hi' }], [], async () => 'ok', e => events.push(e));
+      assert.equal(out, '你好世界');
+      assert.ok(bodies[0].stream_options && bodies[0].stream_options.include_usage === true, '请求体必须带 stream_options.include_usage');
+      const us = events.filter(e => e.type === 'usage');
+      assert.equal(us.length, 1, '一轮一帧 usage 事件');
+      assert.equal(us[0].est, false, 'API 真实返回不带 est 标记');
+      assert.equal(us[0].totals.calls, 1);
+      assert.equal(us[0].totals.prompt, 1200);
+      assert.equal(us[0].totals.completion, 36);
+      assert.equal(us[0].totals.cached, 800, 'cached_tokens 须采集');
+      assert.equal(us[0].last.prompt, 1200);
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('老网关兼容：400 stream_options → 去参降级重试 + 估算兜底 est 标记', async () => {
+    const origFetch = globalThis.fetch;
+    const origBase = process.env.DUAL_AGENT_RETRY_BASE_MS;
+    process.env.DUAL_AGENT_RETRY_BASE_MS = '1'; // 退避加速，测试不等待 3s
+    const bodies = [];
+    let call = 0;
+    globalThis.fetch = async (u, init) => {
+      call += 1;
+      bodies.push(JSON.parse(init.body));
+      if (call === 1) return new Response('Unrecognized request argument supplied: stream_options', { status: 400 });
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: '降级后OK' } }] }),
+        '[DONE]'
+      ]);
+    };
+    try {
+      const events = [];
+      const out = await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: 'hi' }], [], async () => 'ok', e => events.push(e));
+      assert.equal(out, '降级后OK');
+      assert.equal(call, 2, '400 后降级重试恰好一次');
+      assert.ok(bodies[0].stream_options, '首次请求带 stream_options');
+      assert.ok(!bodies[1].stream_options, '降级后请求去掉 stream_options');
+      const u = events.find(e => e.type === 'usage');
+      assert.ok(u, '降级后仍发 usage 事件');
+      assert.equal(u.est, true, '无 usage 帧走估算兜底（est 标记）');
+      assert.ok(u.totals.prompt > 0, '估算值非零');
+    } finally {
+      globalThis.fetch = origFetch;
+      if (origBase === undefined) delete process.env.DUAL_AGENT_RETRY_BASE_MS; else process.env.DUAL_AGENT_RETRY_BASE_MS = origBase;
+    }
+  });
+  await t('多轮累计：工具循环两轮 usage 累加 + 第二轮注入计量注记', async () => {
+    const origFetch = globalThis.fetch;
+    const bodies = [];
+    globalThis.fetch = async (u, init) => {
+      bodies.push(JSON.parse(init.body));
+      if (bodies.length === 1) return sseResponse([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'bash', arguments: '{"command":"echo hi"}' } }] } }] }),
+        JSON.stringify({ choices: [], usage: { prompt_tokens: 500, completion_tokens: 10 } }),
+        '[DONE]'
+      ]);
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: '完成' } }] }),
+        JSON.stringify({ choices: [], usage: { prompt_tokens: 700, completion_tokens: 5 } }),
+        '[DONE]'
+      ]);
+    };
+    try {
+      const events = [];
+      const ran = [];
+      const messages = [{ role: 'user', content: '跑个命令' }];
+      const out = await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, messages, [], async (name, args) => { ran.push(name); return `ran ${name}`; }, e => events.push(e));
+      assert.equal(out, '完成');
+      assert.deepEqual(ran, ['bash'], '插件执行一轮');
+      assert.equal(bodies.length, 2, '两轮 API 调用');
+      assert.ok(bodies[1].messages.some(m => m.role === 'system' && m.content.includes('[token 计量]')), '第二轮发送副本须注入计量注记');
+      assert.ok(!messages.some(m => (m.content || '').includes('[token 计量]')), '落盘 messages 保持干净（注记仅发送）');
+      const us = events.filter(e => e.type === 'usage');
+      assert.equal(us.length, 2);
+      assert.equal(us[1].totals.calls, 2, '累计调用数');
+      assert.equal(us[1].totals.prompt, 1200, '500+700 跨轮累加');
+      assert.equal(us[1].totals.completion, 15, '10+5 跨轮累加');
+    } finally { globalThis.fetch = origFetch; }
   });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
