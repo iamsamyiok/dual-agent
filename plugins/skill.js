@@ -138,13 +138,157 @@ function findBySlug(ctx, name) {
   return listAll(ctx).find(s => s.name === name || s.name === slug);
 }
 
+// ---------- GitHub 一键安装 ----------
+// 源格式解析：owner/repo | owner/repo/sub/dir | https://github.com/owner/repo[/tree/branch/sub/dir]
+// 返回 { owner, repo, branch, subdir }（subdir 为仓库内技能目录路径，可空 = 根即技能）
+function parseGitHubSource(src) {
+  let m = String(src).trim().replace(/\.git$/, '').match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)(?:\/(?:tree|blob)\/([^/]+)(\/.*)?)?\/?$/i);
+  let owner, repo, branch, subdir;
+  if (m) {
+    owner = m[1]; repo = m[2]; branch = m[3] || ''; subdir = (m[4] || '').replace(/^\/+/, '');
+  } else {
+    m = String(src).trim().match(/^([\w.-]+)\/([\w.-]+)(\/.*)?$/);
+    if (!m) throw new Error(`无法解析 GitHub 源：${src}（支持 owner/repo、owner/repo/子目录、完整 URL）`);
+    owner = m[1]; repo = m[2]; subdir = (m[3] || '').replace(/^\/+|\/+$/g, '');
+  }
+  return { owner, repo, branch, subdir };
+}
+
+// tar.gz 内存解包：只依赖 zlib，按 POSIX ustar 头解析（GitHub tarball 足够）
+// 返回 Map<路径, Buffer>（跳过 pax_global_header 与目录条目）
+function untar(gzBuf) {
+  const zlib = require('zlib');
+  const buf = zlib.gunzipSync(gzBuf);
+  const files = new Map();
+  let off = 0;
+  while (off + 512 <= buf.length) {
+    const header = buf.slice(off, off + 512);
+    if (!header.some(b => b !== 0)) break; // 全零块 = 结束
+    const name = header.toString('utf8', 0, 100).replace(/\0.*$/, '');
+    const sizeStr = header.toString('utf8', 124, 136).replace(/\0.*$/, '').trim();
+    const size = parseInt(sizeStr, 8) || 0;
+    const type = header.toString('utf8', 156, 157);
+    const prefix = header.toString('utf8', 345, 500).replace(/\0.*$/, '');
+    const full = prefix ? `${prefix}/${name}` : name;
+    off += 512;
+    if (type === '0' || type === '') files.set(full, buf.slice(off, off + size)); // 仅普通文件
+    off += Math.ceil(size / 512) * 512;
+  }
+  return files;
+}
+
+// 安装到全局共享根（所有工作区可用）；记录版本信息 skills/.installed.json
+async function installFromGitHub(src, ctx) {
+  const { owner, repo, branch, subdir } = parseGitHubSource(src);
+  const root = process.env.DUAL_AGENT_SKILLS_SHARED || path.join(__dirname, '..', 'skills');
+  fs.mkdirSync(root, { recursive: true });
+
+  // 默认分支解析：GitHub API（匿名限额 60/h 够用）；失败回退 HEAD
+  let br = branch;
+  let defaultBranchTip = '';
+  if (!br) {
+    try {
+      const r = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { headers: { 'User-Agent': 'dual-agent' } });
+      if (r.ok) {
+        const meta = await r.json();
+        br = meta.default_branch || 'main';
+      } else if (r.status === 404) {
+        throw new Error(`仓库不存在或不可访问：${owner}/${repo}`);
+      } else { br = 'HEAD'; }
+    } catch (e) { if (e.message && e.message.includes('仓库不存在')) throw e; br = 'HEAD'; }
+  }
+  const ref = br === 'HEAD' ? 'HEAD' : br;
+  const tarUrl = `https://codeload.github.com/${owner}/${repo}/tar.gz/${ref}`;
+  const resp = await fetch(tarUrl, { headers: { 'User-Agent': 'dual-agent' } });
+  if (!resp.ok) throw new Error(`下载失败（HTTP ${resp.status}）：${tarUrl}`);
+  const tarball = Buffer.from(await resp.arrayBuffer());
+  let files;
+  try { files = untar(tarball); } catch (e) { throw new Error(`tarball 解包失败：${e.message}`); }
+  if (!files.size) throw new Error('tarball 为空');
+
+  // tar 根前缀（<repo>-<branch>/）；目标：subdir 下含 SKILL.md 的技能目录
+  const firstKey = files.keys().next().value;
+  const prefix = firstKey.slice(0, firstKey.indexOf('/') + 1);
+  const strip = p => p.startsWith(prefix) ? p.slice(prefix.length) : p;
+  const candidates = new Map(); // 技能目录名 -> { [rel]: Buffer }
+  const sub = subdir ? subdir.replace(/\/+$/, '') + '/' : '';
+  const subLeaf = subdir ? subdir.split('/').filter(Boolean).pop() : ''; // subdir 末段（subdir 直指技能目录时的技能名）
+  // 判定 subdir 语义：subdir 根有 SKILL.md = 直接指向技能目录（全部归一）；否则 subdir 下每个含 SKILL.md 的子目录是一个技能
+  const subdirIsSkill = sub && [...files.keys()].some(k => strip(k) === `${sub}SKILL.md`);
+  for (const [k, v] of files) {
+    const rel = strip(k);
+    if (sub) {
+      if (!rel.startsWith(sub)) continue;
+      const rest = rel.slice(sub.length);
+      if (!rest) continue;
+      const top = subdirIsSkill ? subLeaf : rest.split('/')[0];
+      if (!top) continue;
+      if (!candidates.has(top)) candidates.set(top, new Map());
+      const inner = subdirIsSkill ? rest : rest.slice(top.length + 1);
+      if (inner) candidates.get(top).set(inner, v);
+    } else {
+      const parts = rel.split('/');
+      if (parts.length < 2) continue; // 仓库根散文件不算技能
+      const top = parts[0];
+      if (!candidates.has(top)) candidates.set(top, new Map());
+      candidates.get(top).set(parts.slice(1).join('/'), v);
+    }
+  }
+  // 过滤：必须含 SKILL.md
+  let toInstall = [];
+  for (const [dirName, fmap] of candidates) {
+    if (fmap.has('SKILL.md')) toInstall.push({ name: dirName, files: fmap });
+  }
+  if (!toInstall.length) {
+    throw new Error(`未在 ${owner}/${repo}${subdir ? `/${subdir}` : ''} 中找到任何含 SKILL.md 的技能目录（Agent Skills 标准）。若技能在子目录，试试 url=owner/repo/skills/<name>`);
+  }
+  // 上限保护
+  if (toInstall.length > 30) toInstall = toInstall.slice(0, 30);
+
+  // 版本记录（幂等重装 = 更新）
+  const metaPath = path.join(root, '.installed.json');
+  let meta = {};
+  try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')); } catch { /* ignore */ }
+  const installed = [];
+  for (const it of toInstall) {
+    const safeName = it.name.replace(/[^a-zA-Z0-9\u4e00-\u9fa5-]/g, '-');
+    const dest = path.join(root, safeName);
+    // 防路径逃逸与覆盖无关目录：目标已存在但无 SKILL.md 则拒绝
+    if (fs.existsSync(dest) && !fs.existsSync(path.join(dest, 'SKILL.md'))) {
+      throw new Error(`目标目录已存在且不是技能目录，拒绝覆盖：${dest}`);
+    }
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.mkdirSync(dest, { recursive: true });
+    let n = 0, bytes = 0;
+    for (const [rel, content] of it.files) {
+      const target = path.join(dest, rel);
+      if (!path.resolve(target).startsWith(path.resolve(dest) + path.sep)) continue; // 防逃逸
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, content);
+      n++; bytes += content.length;
+    }
+    // 读 frontmatter 拿标准名（记录用）
+    let stdName = safeName;
+    try {
+      const fm = parseFrontmatter(fs.readFileSync(path.join(dest, 'SKILL.md'), 'utf8'));
+      if (fm && fm.name && STD_NAME_RE.test(fm.name)) stdName = fm.name;
+    } catch { /* ignore */ }
+    meta[stdName] = { source: `github:${owner}/${repo}`, ref: br, dir: safeName, files: n, bytes, installedAt: new Date().toISOString() };
+    installed.push(`${stdName}（${n} 个文件，${(bytes / 1024).toFixed(0)}KB）`);
+  }
+  try { fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2)); } catch { /* 记录失败不阻塞 */ }
+  return `已从 github.com/${owner}/${repo}（${br}）安装 ${installed.length} 个技能到共享技能库：\n${installed.join('\n')}\n用 skill.list() 查看，get(名) 读全文后按其指引执行。`;
+}
+
+
 module.exports = {
   params: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['list', 'get', 'save', 'delete'], description: '操作：list 列出（名称+描述）/ get 读全文 / save 保存 / delete 删除' },
-      name: { type: 'string', description: '技能名（list/get/save/delete 用；get 传 list 返回中的名称）' },
-      content: { type: 'string', description: 'save 必填：技能全文（markdown；建议 YAML frontmatter 含 name/description，首行一句话概述，其后分步骤写清做法与注意事项）' }
+      action: { type: 'string', enum: ['list', 'get', 'save', 'delete', 'install'], description: '操作：list 列出 / get 读全文 / save 保存 / delete 删除 / install 从 GitHub 一键安装' },
+      name: { type: 'string', description: '技能名（list/get/save/delete 用；install 时为 GitHub 源，见 url 参数）' },
+      content: { type: 'string', description: 'save 必填：技能全文（markdown；建议 YAML frontmatter 含 name/description）' },
+      url: { type: 'string', description: 'install 必填：GitHub 源。支持三种格式——仓库简写 owner/repo、带子目录 owner/repo/path/to/skill、完整 URL https://github.com/owner/repo（可选 /tree/branch/subdir）' }
     },
     required: ['action']
   },
@@ -163,8 +307,14 @@ module.exports = {
     }
 
     const name = String(args.name || '').trim();
-    if (!name) throw new Error('name 为空');
-    const found = findBySlug(ctx, name);
+    const found = action === 'install' ? null : findBySlug(ctx, name);
+
+    // ========== install：从 GitHub 一键安装（tarball 拉取 + 内存解包，零依赖） ==========
+    if (action === 'install') {
+      const src = String(args.url || args.name || '').trim();
+      if (!src) throw new Error('install 需要 url 参数（owner/repo 或完整 GitHub URL）');
+      return await installFromGitHub(src, ctx);
+    }
 
     // ========== save：保存为单文件格式（工作区 skills/<slug>.md） ==========
     if (action === 'save') {

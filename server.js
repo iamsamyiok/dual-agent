@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.7.3';
+const APP_VERSION = '0.8.0';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -466,7 +466,7 @@ const server = http.createServer(async (req, res) => {
       const send = sse(req, res);
       send({ type: 'start' });
       // 单向上下文：软约束提示词 + 插件清单（首评附全量源码）+ 审批历史 + 内层日志（失败详/成功简）
-      const ctxOpts = { audit: recentAuditLines(5) };
+      const ctxOpts = { audit: recentAuditLines(5), scores: require('./lib/regression').pluginScores(getInnerLog()) };
       if (!sessionId) {
         // 首次评审（无续聊会话）：全量附带插件源码，杜绝外层"凭描述盲写"
         const codes = new Map();

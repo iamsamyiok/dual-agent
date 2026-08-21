@@ -108,6 +108,7 @@ module.exports = {
 - **渐进式加载**（与标准三阶段一致）：`skill.list()` 只载名称+描述（约 100 token/技能）→ 相关时 `skill.get(name)` 读全文（目录型自动附捆绑资源清单）→ 捆绑资源按需用 `read` 插件读取
 - **`skill:` 协议**（read 插件）：SKILL.md 正文里的相对路径引用（如 `templates/viewer.html`）直接加前缀照抄可读——`read(path="skill:<技能名>/templates/viewer.html")`，框架自动定位技能目录（工作区优先），技能名与 frontmatter `name` 或目录名匹配均可；`skill:<名>` 不带路径则读 SKILL.md 本体
 - **脚本类技能 bash 执行**：`skill.get` 资源清单每项同时给绝对路径（`skill:名/rel → /abs/path`），正文指示运行脚本时用 `→` 后的路径（bash 无法解析 `skill:` 协议）；清单自动过滤 `__pycache__`/`.pyc`
+- **一键安装**（`skill install`）：`skill(action="install", url="owner/repo[/子目录]")` 直接从 GitHub 拉取安装（codeload tarball + 内存解包，零依赖）。支持仓库简写 / 子目录 / 完整 URL（含 tree/branch）；仓库级安装自动发现全部含 SKILL.md 的技能目录（实测一次装入 obra/superpowers 14 个技能）；版本记录在 `skills/.installed.json`（来源/ref/文件数/时间），重装即更新
 - 同名技能工作区版本覆盖全局共享版本
 - `DUAL_AGENT_SKILLS_SHARED` 环境变量可覆盖全局共享目录位置
 
@@ -116,6 +117,23 @@ module.exports = {
 第二轮实测（skill-creator 元技能，33K 正文 + agents/assets/eval-viewer/references/scripts 五层捆绑资源）：内层按其流程 读 references/schemas.md 格式规范 → 创建目录型新技能（frontmatter + evals 用例），新技能即刻被 `skill.list()` 发现——零适配闭环。frontmatter 解析兼容多行 YAML（折叠 `>-` / 字面 `|` / 普通续行），社区技能常见写法无需修改。
 
 第三轮实测（自研 pdf-to-md 技能，脚本型）：内层按 SKILL.md 四步执行——确认输入 → bash 用清单绝对路径运行 `pdf_to_md.py`（pdftotext 优先 / pypdf 回退；标题层级映射、列表规范化、页眉脚剔除、连字符断词合并、表格自动转换与不规则块保守保留）→ read 质检 → edit 把"疑似表格"按原文人工转成规范 Markdown 表格并复核交付。规则转换 + Agent 润色的分工在脚本型技能上闭环。
+
+第四轮实测（skill install 一键安装）：用户一句话"安装 anthropics/skills 里的 pdf 技能"，内层自主构造 `install(url="github.com/anthropics/skills/tree/main/skills/pdf")` → 4.8s 装入 12 文件 57KB → `skill.list()` 确认 27 个技能在库。装技能从"手动 cp"变为对话内一句安装。
+
+## 审批质量闸门与插件记分
+
+- **预检两阶段**（lib/regression.js，apply 前强制）：① 结构冒烟——沙盒加载（Node 内建放行、第三方模块拦截——零依赖保护）、params JSONSchema 与 run 函数校验；② 全量回归——待审变更 + 现役插件复制进隔离沙盒跑完整 smoke，破坏其他插件依赖的建议进不了运行时。审计记录 `preflight-blocked`
+- **插件质量记分**：从内层日志统计每插件总失败率与近期失败率（近 50 次）；近期 ≥5 次调用且成功率 <60% 标记低质量，注入外层评审上下文并指示优先诊断（读源码与失败原文定位根因再提建议）
+- `DUAL_AGENT_NO_PREFLIGHT=1` 跳过预检（测试/演示）；MOCK 模式自动跳过
+
+## 记忆检索与整理
+
+- **TF-IDF 相关度排序**：中英混合分词（英文按词、中文 2-gram），IDF 加权，子串匹配升级为语义排序——"界面主题"同时召回"主题色""深色主题界面"且更相关者在前，无关记忆（Ubuntu 部署）不再误召回
+- **consolidate 归并**：`memory(action="consolidate")` 把同主题短期记忆簇归并为一条长期记忆（Jaccard ≥0.3 或「共同中文 2-gram + 共同英文词」强信号双通道判定），释放 MAX_SHORT 滚动容量。实测「任务weather：xxx」三条过程记忆正确聚簇、「部署服务器」独立保留
+
+## 上下文预算管理
+
+内层会话无限增长最终撞 token 上限 → API 400 无法自愈。发 API 前构造压缩副本（落盘会话保持完整）：预算默认 60000 字符（`DUAL_AGENT_CTX_BUDGET` 可调），超出时从最旧 tool 结果压缩为「头 300 + 尾 100 + 折叠标记」；绝不删除条目（assistant.tool_calls 与 tool 配对完整性）；system 与最近 4 个 tool 结果保持全文。
 
 ## LLM 限流自动重试
 
@@ -130,7 +148,7 @@ module.exports = {
 
 ```bash
 node test/smoke.js
-# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（63 项断言）
+# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（69 项断言）
 ```
 
 ## 环境变量

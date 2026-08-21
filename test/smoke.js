@@ -98,11 +98,13 @@ async function main() {
     assert.ok(!plugins.NAME_RE.test('a/b'));
     assert.ok(plugins.NAME_RE.test('my-tool'));
   });
-  await t('插件清单：9 个插件，essential 均可加载', () => {
+  await t('插件清单：≥9 个插件，essential 均可加载', () => {
     const list = plugins.listPlugins();
-    assert.equal(list.length, 9);
+    // 下限而非锁死数量：审批预检沙盒会带上待审新插件（9 + N），数量上限防失控
+    assert.ok(list.length >= 9, `插件数 ${list.length} < 9`);
+    assert.ok(list.length <= 20, `插件数 ${list.length} 异常膨胀`);
     assert.ok(list.every(p => p.status !== 'broken'), '存在 broken：' + JSON.stringify(list.filter(p => p.status === 'broken')));
-    assert.equal(list.filter(p => p.essential).length, 5);
+    assert.ok(list.filter(p => p.essential).length >= 5);
   });
   await t('runPlugin：执行超时兜底生效（300ms）', async () => {
     fs.writeFileSync(path.join(PLUGINS_TMP, 'sleeper.js'), `module.exports = { run: () => new Promise(r => setTimeout(() => r('late'), 5000)) };`);
@@ -267,7 +269,86 @@ async function main() {
     } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars } = require(path.join(ROOT, 'lib', 'inner'));
+  const { preflight, pluginScores } = require(path.join(ROOT, 'lib', 'regression'));
+  await t('regression 预检：坏结构插件被拦截（params/run 缺失、第三方模块、语法错）', async () => {
+    const bad = await preflight([{ action: 'create', plugin: 't-bad', code: 'module.exports = { run: "x" };' }]);
+    assert.ok(!bad.ok && bad.stage === 'syntax' && /params/.test(bad.error), bad.error);
+    const third = await preflight([{ action: 'create', plugin: 't-3rd', code: 'require("lodash");module.exports = { params: { type: "object" }, run: async () => 1 };' }]);
+    assert.ok(!third.ok && /第三方模块/.test(third.error), third.error);
+    const syn = await preflight([{ action: 'create', plugin: 't-syn', code: 'const = ;' }]);
+    assert.ok(!syn.ok, '语法错应拦');
+  });
+  await t('regression 预检：合法插件通过全量回归（沙盒 smoke）', async () => {
+    if (process.env.DUAL_AGENT_NO_PREFLIGHT === '1') return; // 防递归：预检沙盒内跳过本测试
+    const good = await preflight([{ action: 'create', plugin: 't-good', code: '// @name t-good\nmodule.exports = { params: { type: "object", properties: { a: { type: "string" } }, required: ["a"] }, run: async (x) => "ok:" + x.a };' }]);
+    assert.ok(good.ok, good.error || '合法插件应通过');
+  });
+  await t('regression 插件质量记分：近期失败率与低质量标记', () => {
+    const log = [];
+    for (let i = 0; i < 9; i++) log.push({ plugin: 'fetch', ok: i > 3 });
+    log.push({ plugin: 'write', ok: true });
+    const s = pluginScores(log);
+    const fetchS = s.find(x => x.name === 'fetch');
+    assert.ok(fetchS && fetchS.lowQuality, 'fetch 近期失败率 44% 应标低质量');
+    assert.ok(!s.find(x => x.name === 'write').lowQuality);
+  });
+  await t('memory TF-IDF：相关度排序召回（子串匹配升级）', async () => {
+    const T2 = path.join(TMP, 'ws-tfidf');
+    fs.mkdirSync(T2, { recursive: true });
+    const ctx2 = { cwd: T2, dataDir: TMP };
+    await plugins.runPlugin('memory', { action: 'save', level: 'long', content: '用户偏好深色主题界面', tags: ['UI'] }, ctx2);
+    await plugins.runPlugin('memory', { action: 'save', level: 'long', content: '项目部署在 Ubuntu 22.04', tags: ['运维'] }, ctx2);
+    await plugins.runPlugin('memory', { action: 'save', level: 'long', content: '界面主题色改蓝紫', tags: ['UI', '主题'] }, ctx2);
+    const r = await plugins.runPlugin('memory', { action: 'search', query: '界面主题', level: 'long' }, ctx2);
+    assert.ok(r.includes('界面主题色') && r.includes('用户偏好深色主题'), '两条主题相关记忆应召回：' + r);
+    assert.ok(!r.includes('Ubuntu'), '无关记忆不应召回');
+    assert.ok(r.indexOf('界面主题色') < r.indexOf('用户偏好深色主题'), '更相关者排前');
+  });
+  await t('memory consolidate：同主题短期记忆归并释放容量', async () => {
+    const T2 = path.join(TMP, 'ws-consol');
+    fs.mkdirSync(T2, { recursive: true });
+    const ctx2 = { cwd: T2, dataDir: TMP };
+    for (const c of ['任务weather：fetch去噪已修复', '任务weather：search结果正常', '任务weather：天气查询端到端通过', '任务plugin：write幂等上线', '任务plugin：read分段读取', '部署服务器到Ubuntu']) {
+      await plugins.runPlugin('memory', { action: 'save', level: 'short', content: c }, ctx2);
+    }
+    const r = await plugins.runPlugin('memory', { action: 'consolidate' }, ctx2);
+    assert.ok(r.includes('已归并 2 簇') && r.includes('#1 + #2 + #3'), 'weather 三条应聚一簇：' + r);
+    assert.ok(!r.includes('Ubuntu'), '独立记忆不应被归并');
+    const after = JSON.parse(fs.readFileSync(path.join(T2, '.memory-short.json'), 'utf8'));
+    assert.equal(after.length, 1, '近期库应只剩 1 条独立记忆');
+    const lg = JSON.parse(fs.readFileSync(path.join(T2, '.memory-long.json'), 'utf8'));
+    assert.ok(lg.some(m => (m.mergedFrom || []).length === 3), '长期库应有 3 条归并的条目');
+  });
+  await t('上下文预算：超阈值压缩旧 tool 结果（保配对、保近期全文）', () => {
+    const msgs = [
+      { role: 'system', content: 'S'.repeat(5000) },
+      { role: 'user', content: '任务' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read', arguments: '{"path":"a"}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: 'A'.repeat(30000) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c2', type: 'function', function: { name: 'read', arguments: '{"path":"b"}' } }] },
+      { role: 'tool', tool_call_id: 'c2', content: 'B'.repeat(30000) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c3', type: 'function', function: { name: 'read', arguments: '{"path":"c"}' } }] },
+      { role: 'tool', tool_call_id: 'c3', content: 'C'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c4', type: 'function', function: { name: 'read', arguments: '{"path":"d"}' } }] },
+      { role: 'tool', tool_call_id: 'c4', content: 'D'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c5', type: 'function', function: { name: 'read', arguments: '{"path":"e"}' } }] },
+      { role: 'tool', tool_call_id: 'c5', content: 'E'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c6', type: 'function', function: { name: 'read', arguments: '{"path":"f"}' } }] },
+      { role: 'tool', tool_call_id: 'c6', content: 'F'.repeat(200) },
+    ];
+    const budget = 60000;
+    assert.ok(estimateChars(msgs) > budget, '原始应超预算');
+    const out = budgetMessages(msgs);
+    assert.equal(out.length, msgs.length, '不得删除条目（配对完整性）');
+    assert.ok(out[3].content.length < 5000 && out[3].content.includes('已折叠'), '旧 tool 应被压缩');
+    assert.equal(out[11].content.length, 200, '最近第 3 个 tool 保持全文');
+    assert.equal(out[13].content.length, 200, '最近 tool 保持全文');
+    assert.equal(out[0].content.length, 5000, 'system 不压缩');
+    // 未超预算时原样返回
+    const small = [{ role: 'system', content: 'x' }, { role: 'user', content: 'y' }];
+    assert.equal(budgetMessages(small), small, '未超预算应原引用返回');
+  });
   const { withRetry, RetryableError, isRetryableStatus, isRateLimitText } = require(path.join(ROOT, 'lib', 'llmRetry'));
   await t('llmRetry：限流 429 → 退避后重试成功（info 事件可见）', async () => {
     let n = 0;
@@ -506,7 +587,7 @@ async function main() {
     assert.ok(!r.ok && r.error.includes('语法'), r.error);
   });
   await t('addProposal：危险模式转为审批警告', () => {
-    const r = approval.addProposal({ action: 'create', plugin: 'warn1', code: `require('child_process'); module.exports = { run: async () => 'x' };`, reason: 'r' }, 'outer');
+    const r = approval.addProposal({ action: 'create', plugin: 'warn1', code: `require('child_process'); module.exports = { params: { type: 'object', properties: { x: { type: 'string' } }, required: ['x'] }, run: async () => 'x' };`, reason: 'r' }, 'outer');
     assert.ok(r.ok);
     assert.ok(r.proposal.warns.length >= 1, '应有警告');
     warnId = r.proposal.id;
