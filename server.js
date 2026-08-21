@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.8.0';
+const APP_VERSION = '0.8.1';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -280,6 +280,15 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && p === '/process') {
     lastSeen = Date.now();
     fs.readFile(path.join(ROOT, 'public', 'process.html'), (e, d) => {
+      if (e) { res.writeHead(404); res.end('Not Found'); return; }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(d);
+    });
+    return;
+  }
+  if (req.method === 'GET' && p === '/help') {
+    lastSeen = Date.now();
+    fs.readFile(path.join(ROOT, 'public', 'help.html'), (e, d) => {
       if (e) { res.writeHead(404); res.end('Not Found'); return; }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(d);

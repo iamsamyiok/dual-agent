@@ -1,6 +1,6 @@
 {
   "name": "dual-agent-loop",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "双层 Agent 自迭代系统 — 内层执行 + 外层迭代插件（零依赖 demo）",
   "scripts": {

@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dual-Agent 帮助文档</title>
+<style>
+  :root { --ink:#1f2937; --sub:#6b7280; --line:#e5e7eb; --blue:#2563eb; --bg:#f8fafc; --card:#fff; --green:#059669; --amber:#d97706; --red:#dc2626; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font: 14px/1.75 "PingFang SC","Microsoft YaHei",system-ui,sans-serif; color: var(--ink); background: var(--bg); }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 26px; margin-bottom: 6px; }
+  .sub { color: var(--sub); margin-bottom: 28px; }
+  h2 { font-size: 20px; margin: 44px 0 14px; padding-left: 10px; border-left: 4px solid var(--blue); }
+  h3 { font-size: 15.5px; margin: 20px 0 8px; }
+  p { margin: 8px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin: 14px 0; }
+  code { background: #eef2ff; color: #3730a3; padding: 1px 6px; border-radius: 4px; font-size: 12.5px; font-family: ui-monospace,Menlo,Consolas,monospace; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 13px; }
+  th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; white-space: nowrap; }
+  /* ===== 结构图 ===== */
+  .diagram { background: #fff; border: 1px dashed #cbd5e1; border-radius: 12px; padding: 22px; margin: 14px 0; overflow-x: auto; }
+  .dg-center { display: flex; flex-direction: column; align-items: center; min-width: 640px; }
+  .node { border: 2px solid var(--blue); background: #eff6ff; border-radius: 10px; padding: 8px 18px; text-align: center; min-width: 180px; }
+  .node b { display: block; font-size: 14px; }
+  .node span { font-size: 11.5px; color: var(--sub); }
+  .node.user { border-color: #9ca3af; background: #f9fafb; }
+  .node.inner { border-color: var(--green); background: #ecfdf5; }
+  .node.outer { border-color: #7c3aed; background: #f5f3ff; }
+  .node.store { border-color: var(--amber); background: #fffbeb; }
+  .node.danger { border-color: var(--red); background: #fef2f2; }
+  .arrow { color: #94a3b8; font-size: 20px; line-height: 1.1; padding: 2px 0; text-align: center; }
+  .arrow small { display: block; font-size: 11px; color: var(--sub); }
+  .row { display: flex; gap: 14px; align-items: stretch; justify-content: center; flex-wrap: wrap; }
+  .row .node { flex: 0 0 auto; }
+  .lane { border: 1.5px dashed #cbd5e1; border-radius: 12px; padding: 12px 14px 14px; position: relative; margin: 6px 0; }
+  .lane > .lane-title { position: absolute; top: -10px; left: 14px; background: #fff; padding: 0 8px; font-size: 12px; color: var(--sub); }
+  .steps { display: flex; gap: 0; align-items: center; justify-content: center; flex-wrap: wrap; }
+  .step { border: 1.6px solid var(--blue); background: #eff6ff; border-radius: 9px; padding: 6px 12px; font-size: 12.5px; text-align: center; }
+  .step b { display: block; font-size: 13px; }
+  .harrow { color: #94a3b8; font-size: 18px; padding: 0 4px; }
+  .loopnote { font-size: 11.5px; color: var(--sub); text-align: center; margin-top: 6px; }
+  .tag { display: inline-block; font-size: 11px; border-radius: 20px; padding: 0 9px; margin-right: 6px; vertical-align: 1px; }
+  .tag.g { background:#d1fae5; color:#065f46; } .tag.a { background:#fef3c7; color:#92400e; } .tag.b { background:#dbeafe; color:#1e40af; } .tag.r { background:#fee2e2; color:#991b1b; }
+  .toc { columns: 2; column-gap: 32px; font-size: 13.5px; }
+  .toc a { color: var(--blue); text-decoration: none; display: block; padding: 2px 0; }
+  .toc a:hover { text-decoration: underline; }
+  .kbd { border:1px solid #cbd5e1; border-bottom-width:2px; border-radius:5px; padding:0 6px; font-size:12px; background:#fff; }
+  ul { padding-left: 22px; } li { margin: 3px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Dual-Agent 双层自迭代系统 · 帮助文档</h1>
+  <div class="sub">版本 <span id="ver"></span> —— 一个会「干活」也会「改进自己」的 Agent 系统。本文用结构图 + 文字讲清它的每一个机制。</div>
+
+  <div class="card">
+    <b>目录</b>
+    <div class="toc">
+      <a href="#s1">1. 三分钟看懂：它是做什么的</a>
+      <a href="#s2">2. 总体架构图</a>
+      <a href="#s3">3. 内层执行 Agent：任务是怎么完成的</a>
+      <a href="#s4">4. 外层评审 Agent：系统是怎么自我改进的</a>
+      <a href="#s5">5. 插件系统（工具层）</a>
+      <a href="#s6">6. 技能系统（方法论层）</a>
+      <a href="#s7">7. 记忆系统</a>
+      <a href="#s8">8. 安全与质量闸门</a>
+      <a href="#s9">9. 健壮性机制（自动恢复）</a>
+      <a href="#s10">10. 界面导览</a>
+      <a href="#s11">11. 环境变量与部署</a>
+      <a href="#s12">12. 常见问题 FAQ</a>
+    </div>
+  </div>
+
+  <!-- ==================== 1 ==================== -->
+  <h2 id="s1">1. 三分钟看懂：它是做什么的</h2>
+  <div class="card">
+    <p>普通 AI 聊天应用只有「一双手」——能干活，但干完就完，工具永远不变。<b>Dual-Agent 有两层大脑</b>：</p>
+    <ul>
+      <li><b>内层执行 Agent</b>（左中栏）：接到你的任务后自主规划，调用插件干活——写文件、跑命令、查资料、记笔记，循环往复直到完成。</li>
+      <li><b>外层评审 Agent</b>（右栏）：像一个随身架构师，定期阅读内层的工作日志与插件源码，提出「改进建议」（新增/修改/删除插件），经你审批后热加载生效。</li>
+    </ul>
+    <p>于是系统在使用过程中<b>越用越顺手</b>：内层暴露出的弱点（某个插件不好用、某类任务缺工具），会被外层发现并修复，全程你只需要点「批准」。</p>
+  </div>
+
+  <!-- ==================== 2 ==================== -->
+  <h2 id="s2">2. 总体架构图</h2>
+  <div class="diagram"><div class="dg-center">
+    <div class="node user"><b>你（浏览器）</b><span>三栏控制台 · SSE 流式展示</span></div>
+    <div class="arrow">↓ ↑<small>HTTP / Server-Sent Events</small></div>
+    <div class="node"><b>server.js（Node · 零依赖）</b><span>会话管理 · 工作区隔离 · 审批管线 · SSE 事件流</span></div>
+    <div class="arrow">↓</div>
+    <div class="row">
+      <div class="lane" style="flex:1;min-width:300px">
+        <div class="lane-title">执行通道（绿）</div>
+        <div class="dg-center">
+          <div class="node inner"><b>内层执行 Agent</b><span>OpenAI 兼容 API · 直连<br>工具调用循环（最多 24 轮）</span></div>
+          <div class="arrow">↓ ↑</div>
+          <div class="node"><b>插件运行时（9+ 个）</b><span>bash / write / read / edit / fetch / search<br>memory / skill / todo</span></div>
+        </div>
+      </div>
+      <div class="lane" style="flex:1;min-width:300px">
+        <div class="lane-title">进化通道（紫）</div>
+        <div class="dg-center">
+          <div class="node outer"><b>外层评审 Agent</b><span>本机 opencode CLI 子进程<br>读日志 + 插件源码 → 提建议</span></div>
+          <div class="arrow">↓</div>
+          <div class="node store"><b>审批队列 → 预检闸门</b><span>快照 → 沙盒回归 → 热加载</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="node store"><b>持久层（磁盘）</b><span>workspaces/&lt;工作区&gt;/（会话·记忆·技能·过程） · .data/（审计·快照·日志） · plugins/（插件源码）</span></div>
+  </div></div>
+  <div class="card">
+    <p><b>读图要点</b>：绿色通道负责「把任务做完」，紫色通道负责「让下次做得更好」。两条通道共享同一个 server.js 与持久层，但<b>外层只能建议、不能直接改</b>——所有改动必须经过审批栏的预检闸门才能生效，且随时可回滚。</p>
+  </div>
+
+  <!-- ==================== 3 ==================== -->
+  <h2 id="s3">3. 内层执行 Agent：任务是怎么完成的</h2>
+  <div class="diagram"><div class="dg-center">
+    <div class="node user"><b>你的任务</b><span>如「把 test.pdf 转成 markdown」</span></div>
+    <div class="arrow">↓</div>
+    <div class="node inner"><b>内层 LLM 规划</b><span>系统提示 + 记忆检索 + 技能清单</span></div>
+    <div class="arrow">↓</div>
+    <div class="steps">
+      <div class="step"><b>调插件</b>write/read/bash…</div>
+      <div class="harrow">→</div>
+      <div class="step"><b>拿结果</b>全文回填对话</div>
+      <div class="harrow">→</div>
+      <div class="step"><b>再规划</b>下一步或收尾</div>
+    </div>
+    <div class="loopnote">↑ 循环（同轮最多 24 轮，单插件连续失败 3 次自动止损）</div>
+    <div class="arrow">↓</div>
+    <div class="node inner"><b>最终中文总结</b><span>产出文件路径 + 关键结果</span></div>
+  </div></div>
+  <div class="card">
+    <h3>执行前的固定动作</h3>
+    <ul>
+      <li><b>记忆检索</b>：先 <code>memory.search(任务关键词)</code>，历史偏好/项目结构作为背景。</li>
+      <li><b>技能扫描</b>：<code>skill.list()</code> 只载入名称+描述（约 100 token/技能，省上下文）；发现相关技能必须 <code>skill.get()</code> 读全文并照步骤执行。</li>
+    </ul>
+    <h3>执行中的保护</h3>
+    <ul>
+      <li><b>参数净化</b>：模型流式输出的参数偶有残缺（键无引号/截断/丢失），框架自动修复或给出精准重试提示，避免死循环。</li>
+      <li><b>止损</b>：同一插件连续失败 3 次即跳过，强制换策略。</li>
+      <li><b>传输降级</b>：参数连续 2 次在传输中丢失，自动提示改「分段写入」模式。</li>
+      <li><b>上下文预算</b>：会话超过 6 万字符时，旧工具结果自动折叠（保留首尾），永不撞 token 上限；完整过程仍落盘 process 页。</li>
+    </ul>
+  </div>
+
+  <!-- ==================== 4 ==================== -->
+  <h2 id="s4">4. 外层评审 Agent：系统是怎么自我改进的</h2>
+  <div class="diagram"><div class="dg-center">
+    <div class="steps">
+      <div class="step"><b>① 触发评审</b>右栏对话 / 插件页「AI 修复」<br>低质量插件自动标记</div>
+      <div class="harrow">→</div>
+      <div class="step"><b>② 注入上下文</b>插件清单+源码+失败日志<br>+质量记分+审批历史</div>
+      <div class="harrow">→</div>
+      <div class="step"><b>③ 产出建议</b>标准 JSON（create/update/delete）</div>
+    </div>
+    <div class="arrow">↓</div>
+    <div class="node store"><b>④ 审批栏（你决定）</b><span>代码 diff 预览 · 危险模式警告 · 批准 / 拒绝</span></div>
+    <div class="arrow">↓ 批准后</div>
+    <div class="steps">
+      <div class="step"><b>⑤ 快照</b>改动前插件备份</div>
+      <div class="harrow">→</div>
+      <div class="step"><b>⑥ 预检闸门</b>结构冒烟+全量回归</div>
+      <div class="harrow">→</div>
+      <div class="step"><b>⑦ 热加载</b>立即生效无需重启</div>
+    </div>
+    <div class="arrow">↓ 若出问题</div>
+    <div class="node danger"><b>一键回滚</b><span>恢复到最近快照（回滚本身也可回滚）</span></div>
+  </div></div>
+  <div class="card">
+    <p>外层每条建议都带 <b>reason</b>（改什么、为什么）。被拒建议进入审计历史，评审提示会附上最近决定，避免反复提同一提案。</p>
+    <h3>预检闸门（v0.8.0+，坏插件进不了运行时）</h3>
+    <ul>
+      <li><b>阶段一 结构冒烟</b>：沙盒加载插件代码——语法错误、缺少 params 定义、run 非函数、引用第三方模块（本项目零依赖）直接拦截。</li>
+      <li><b>阶段二 全量回归</b>：把「待审变更 + 现役全部插件」复制进隔离沙盒，完整跑一遍 smoke 测试；破坏其他插件依赖的改动被拦截。</li>
+    </ul>
+    <h3>插件质量记分</h3>
+    <p>每次评审自动附带各插件的失败率统计；近期调用 ≥5 次且成功率低于 60% 的插件被标记 <span class="tag r">低质量</span>，外层会优先诊断它。</p>
+  </div>
+
+  <!-- ==================== 5 ==================== -->
+  <h2 id="s5">5. 插件系统（工具层）</h2>
+  <div class="card">
+    <table>
+      <tr><th>插件</th><th>职责</th><th>要点</th></tr>
+      <tr><td><code>bash</code> <span class="tag r">基础</span></td><td>执行 shell 命令</td><td>超时保护；无输出的重定向给确认提示</td></tr>
+      <tr><td><code>write</code> <span class="tag r">基础</span></td><td>写文件</td><td>原子写入（tmp+rename）；append 幂等（重试自动去重）；高相似续写拦截 / 低相似重构放行</td></tr>
+      <tr><td><code>read</code> <span class="tag r">基础</span></td><td>读文件</td><td>offset/limit 分段、tail 读尾；<code>skill:</code> 协议直读技能捆绑资源</td></tr>
+      <tr><td><code>edit</code> <span class="tag r">基础</span></td><td>精确替换</td><td>oldText 必须与文件完全一致</td></tr>
+      <tr><td><code>fetch</code> <span class="tag b">联网</span></td><td>抓网页正文</td><td>导航/菜单/页脚去噪；title 置顶；正文截断保护</td></tr>
+      <tr><td><code>search</code> <span class="tag b">联网</span></td><td>搜索</td><td>多引擎；结果配合 fetch 读全文</td></tr>
+      <tr><td><code>memory</code> <span class="tag r">基础</span></td><td>三层记忆</td><td>TF-IDF 检索；consolidate 归并</td></tr>
+      <tr><td><code>skill</code> <span class="tag b">技能</span></td><td>技能库</td><td>Agent Skills 开放标准；GitHub 一键安装</td></tr>
+      <tr><td><code>todo</code> <span class="tag b">规划</span></td><td>任务清单</td><td>多任务并行勾选</td></tr>
+    </table>
+    <p>插件是<b>原子级单一职责</b>的 JS 文件（<code>plugins/&lt;name&gt;.js</code>）：文件头 <code>// @name // @desc // @essential</code> 提供元信息，导出 <code>params</code>（JSON Schema，模型据此填参）与 <code>run(args, ctx)</code>。左栏插件页可直接在线编辑，保存走同一审批管线（快照+预检+热加载）。</p>
+  </div>
+
+  <!-- ==================== 6 ==================== -->
+  <h2 id="s6">6. 技能系统（方法论层）</h2>
+  <div class="card">
+    <p>插件是「手」，技能是「操作手册」。技能 = 一个 markdown 文档（含步骤），兼容 <a href="https://agentskills.io" target="_blank">Agent Skills 开放标准</a>，社区技能<b>零适配直接用</b>。</p>
+    <div class="diagram" style="margin:10px 0"><div class="dg-center">
+      <div class="steps">
+        <div class="step"><b>渐进式三阶段</b><br>list 名称+描述（~100 token/技能）</div>
+        <div class="harrow">→</div>
+        <div class="step"><b>get 全文</b><br>SKILL.md + 捆绑资源清单<br>（skill: 路径 + bash 绝对路径）</div>
+        <div class="harrow">→</div>
+        <div class="step"><b>按需取资源</b><br>read 用 skill: 协议<br>bash 用清单里的绝对路径</div>
+      </div>
+    </div></div>
+    <ul>
+      <li><b>两个搜索根</b>：工作区 <code>skills/</code>（就近优先）+ 项目根 <code>skills/</code>（全局共享）。同名技能工作区版本覆盖全局。</li>
+      <li><b>目录型标准技能</b>：<code>&lt;name&gt;/SKILL.md</code>（YAML frontmatter：name + description）可捆绑 scripts/references/assets；<b>单文件简化格式</b>：<code>&lt;name&gt;.md</code>。frontmatter 支持多行 YAML。</li>
+      <li><b>一键安装</b>：对话里说「安装 owner/repo 的 xx 技能」即可——框架从 GitHub 拉 tarball、内存解包、自动发现技能目录、记录版本（<code>skills/.installed.json</code>）。支持仓库简写 / 子目录 / 完整 URL，仓库级批量安装。</li>
+      <li><b>沉淀</b>：内层完成复杂任务后可用 <code>skill.save()</code> 把方法存为新技能，下次直接复用。</li>
+    </ul>
+  </div>
+
+  <!-- ==================== 7 ==================== -->
+  <h2 id="s7">7. 记忆系统</h2>
+  <div class="card">
+    <table>
+      <tr><th>层级</th><th>存续</th><th>存什么</th><th>容量</th></tr>
+      <tr><td>session</td><td>当前会话</td><td>对话上下文（框架自动管理）</td><td>受上下文预算保护</td></tr>
+      <tr><td>short（近期）</td><td>持久化</td><td>任务摘要（≤500 字）</td><td>滚动 20 条</td></tr>
+      <tr><td>long（长期）</td><td>持久化</td><td>用户偏好、项目结构、技术选型（≤1000 字）</td><td>滚动 20 条</td></tr>
+    </table>
+    <ul>
+      <li><b>TF-IDF 检索</b>：中英混合分词（英文按词 + 中文二元组），相关度排序——比子串匹配召回更准，「界面主题」能同时召回「主题色改蓝紫」和「深色主题界面」。</li>
+      <li><b>consolidate 归并</b>：<code>memory(action="consolidate")</code> 把同主题的近期记忆簇归并成一条长期记忆（保留全部要点），释放近期容量——避免同任务的多条过程记忆被新任务挤出。</li>
+      <li><b>防重</b>：保存前精确去重；保存的 id 单调递增，删除不回退。</li>
+    </ul>
+    <p>记忆随<b>工作区</b>隔离：切换工作区后互不干扰（会话、技能、过程文件同理）。</p>
+  </div>
+
+  <!-- ==================== 8 ==================== -->
+  <h2 id="s8">8. 安全与质量闸门</h2>
+  <div class="card">
+    <table>
+      <tr><th>机制</th><th>作用</th></tr>
+      <tr><td>审批制</td><td>外层建议只有你批准才生效；危险模式（child_process、网络、eval…）在审批时黄条警告</td></tr>
+      <tr><td>静态 lint</td><td>语法错误的代码连审批队列都进不了</td></tr>
+      <tr><td>预检闸门</td><td>批准后先过沙盒冒烟 + 全量回归，坏插件进不了运行时</td></tr>
+      <tr><td>快照回滚</td><td>每次改动前自动备份（保留最近 2 版）；插件页「回滚」一键恢复，回滚本身可再回滚</td></tr>
+      <tr><td>审计日志</td><td>全部关键操作（提案/批准/拒绝/回滚/拦截）带时间戳落盘，页面右上角可查</td></tr>
+      <tr><td>止损</td><td>同插件连续失败 3 次即停，防模型在错误上无限重试烧 token</td></tr>
+    </table>
+  </div>
+
+  <!-- ==================== 9 ==================== -->
+  <h2 id="s9">9. 健壮性机制（自动恢复）</h2>
+  <div class="card">
+    <table>
+      <tr><th>故障</th><th>自动处理</th></tr>
+      <tr><td>LLM 限流（429/配额/过载）</td><td>指数退避重试：3s → 9s → 27s → 81s，共 4 次；界面上可见「⏳ X 秒后自动重试（第 n/4 次）」</td></tr>
+      <tr><td>网络抖动（连接重置等）</td><td>同上序列自动重试</td></tr>
+      <tr><td>非限流错误（400 参数错等）</td><td>立即失败——不掩盖真实配置问题</td></tr>
+      <tr><td>流式参数残缺</td><td>自动净化（补引号/合桶）；整体丢失给精准重试提示；连续丢失强制分段模式</td></tr>
+      <tr><td>会话过长</td><td>上下文预算自动折叠旧工具结果（落盘完整，发送压缩）</td></tr>
+      <tr><td>页面刷新/误关</td><td>正在执行的任务不受影响；重开页面自动恢复锁定状态并轮询至完成</td></tr>
+      <tr><td>服务重启</td><td>待审批队列、会话、记忆、审计全部持久化，重启即恢复</td></tr>
+    </table>
+  </div>
+
+  <!-- ==================== 10 ==================== -->
+  <h2 id="s10">10. 界面导览</h2>
+  <div class="card">
+    <table>
+      <tr><th>区域</th><th>说明</th></tr>
+      <tr><td>左栏 · 插件</td><td>插件清单（状态/描述）与源码在线编辑；保存走审批管线；「AI 修复」按钮把坏插件丢给外层修</td></tr>
+      <tr><td>中栏 · 内层对话</td><td>下达任务；顶部有工作区切换；执行中显示单条状态条（第 N 次调用·当前插件），<b>双击状态条打开完整过程页</b></td></tr>
+      <tr><td>右栏 · 外层评审</td><td>与架构师对话：让它评审、提建议、答疑；产出的建议自动进入底部审批栏</td></tr>
+      <tr><td>底部 · 审批栏</td><td>待审建议的 diff 预览 + 危险警告；批准（预检→热加载）/拒绝</td></tr>
+      <tr><td>/process 过程页</td><td>当前工作区每次任务的完整执行记录（入参 JSON + 全量结果），审计级留痕</td></tr>
+      <tr><td>审计日志弹窗</td><td>最近 100 条关键操作流水</td></tr>
+      <tr><td>三栏均可折叠</td><td>点击栏头折叠为窄条，布局记忆在浏览器</td></tr>
+    </table>
+  </div>
+
+  <!-- ==================== 11 ==================== -->
+  <h2 id="s11">11. 环境变量与部署</h2>
+  <div class="card">
+    <table>
+      <tr><th>变量</th><th>默认</th><th>说明</th></tr>
+      <tr><td><code>PORT</code></td><td>3788</td><td>服务端口</td></tr>
+      <tr><td><code>DUAL_AGENT_MOCK=1</code></td><td>-</td><td>演示模式（无需真实 API）</td></tr>
+      <tr><td><code>DUAL_AGENT_AUTO_APPROVE=0</code></td><td>开</td><td>关闭外层 opencode --auto（可能因权限询问卡住）</td></tr>
+      <tr><td><code>DUAL_AGENT_OPENCODE_CMD</code></td><td>自动探测</td><td>显式指定 opencode 路径</td></tr>
+      <tr><td><code>DUAL_AGENT_PLUGIN_TIMEOUT_MS</code></td><td>60000</td><td>单次插件执行兜底超时</td></tr>
+      <tr><td><code>DUAL_AGENT_CTX_BUDGET</code></td><td>60000</td><td>内层上下文预算（字符）</td></tr>
+      <tr><td><code>DUAL_AGENT_RETRY_BASE_MS</code></td><td>3000</td><td>限流退避基数（3^n 序列）</td></tr>
+      <tr><td><code>DUAL_AGENT_SKILLS_SHARED</code></td><td>&lt;root&gt;/skills</td><td>全局共享技能目录</td></tr>
+      <tr><td><code>DUAL_AGENT_NO_PREFLIGHT=1</code></td><td>-</td><td>跳过审批预检（测试用）</td></tr>
+      <tr><td><code>DUAL_AGENT_DATA / PLUGINS_DIR / WS_ROOT</code></td><td>-</td><td>目录覆盖（测试隔离）</td></tr>
+    </table>
+    <p>部署：<code>node server.js</code> 即可（Node ≥18，无任何 npm 依赖）。配置内层 API：右上角「配置」填 base_url / api_key / model（OpenAI 兼容接口）。</p>
+  </div>
+
+  <!-- ==================== 12 ==================== -->
+  <h2 id="s12">12. 常见问题 FAQ</h2>
+  <div class="card">
+    <h3>Q：内层一直显示「执行中」没有输出？</h3>
+    <p>任务可能处于工具调用阶段（如跑长命令）。看中栏状态条当前插件，双击打开 /process 看实时日志。若触发限流会显示 ⏳ 自动重试倒计时。</p>
+    <h3>Q：外层提的建议被「预检拦截」了？</h3>
+    <p>预检发现该建议代码有结构问题（语法/缺 params/引第三方模块）或会让全量回归测试失败。拦截详情在审计日志；让外层「看预检错误重新修复」即可。</p>
+    <h3>Q：插件改坏了怎么办？</h3>
+    <p>左栏插件页「回滚」一键恢复最近快照；连续回滚在两个版本间交替。</p>
+    <h3>Q：怎么装社区技能？</h3>
+    <p>直接对话：「安装 anthropics/skills 里的 docx 技能」。或手动把技能目录拷进 <code>skills/</code>，刷新即可发现。</p>
+    <h3>Q：多个项目怎么互不干扰？</h3>
+    <p>中栏顶部切换工作区：会话、记忆、技能、过程文件按工作区隔离；插件全局共享。</p>
+  </div>
+
+  <div class="sub" style="margin-top:40px;text-align:center">Dual-Agent · 零依赖双层自迭代 Agent 系统 · <a href="/" style="color:var(--blue)">返回控制台</a></div>
+</div>
+<script>
+  fetch('/api/health').then(r => r.json()).then(d => { document.getElementById('ver').textContent = d.version || ''; }).catch(() => {});
+</script>
+</body>
+</html>

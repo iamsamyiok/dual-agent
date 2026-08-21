@@ -93,6 +93,7 @@
   .chat-body::-webkit-scrollbar-thumb:hover { background: #64748b; }
   .chat-body { scrollbar-width: auto; scrollbar-color: #94a3b8 #f1f5f9; }
   .msg { max-width: 92%; border-radius: 10px; padding: 8px 12px; white-space: pre-wrap; word-break: break-word; font-size: 12.5px; }
+  .msg.empty { display: none; }
   .msg.user { align-self: flex-end; background: #3b82f6; color: #fff; }
   .msg.assistant { align-self: flex-start; background: #f3f4f6; border: 1px solid #e5e7eb; }
   .msg.error { align-self: stretch; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; max-width: 100%; }
@@ -193,6 +194,7 @@
     <span class="grow"></span>
     <button class="hd-btn" onclick="openConfig()">配置</button>
     <button class="hd-btn" onclick="loadAudit()">审计日志</button>
+    <button class="hd-btn" onclick="window.open('/help','_blank')">帮助文档</button>
   </header>
 
   <main>
@@ -362,7 +364,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.8.0';
+const PAGE_VERSION = '0.8.1';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -667,6 +669,7 @@ async function runOuterChat(text, displayText) {
     });
   } catch (e) { appendMsg('outerMsgs', 'error', e.message, ''); }
   finally {
+    if (ai.classList.contains('empty')) ai.remove(); // 整轮无文字输出时清理空框
     outerBusy = false;
     input.disabled = false; $('outerSendBtn').disabled = false;
     $('outerBusy').style.display = 'none';
@@ -763,6 +766,7 @@ async function innerSend() {
     });
   } catch (e) { appendMsg('innerMsgs', 'error', e.message, ''); }
   finally {
+    if (ai.classList.contains('empty')) ai.remove(); // 整轮无文字输出时清理空框
     // 状态条定格为汇总行（完整过程在 /process 页）
     const bar = $('innerMsgs')._toolBar;
     if (bar && bar._stat) {
@@ -829,10 +833,13 @@ async function recoverRunningTask() {
 }
 
 // ==================== 消息渲染辅助 ====================
+// 空 assistant 气泡加 .empty（CSS 隐藏）：内层先执行工具调用时不再挂空白框，
+// 首次有文字才显示（ensureLive 移除标记并移到末尾保证时序）
 function appendMsg(boxId, cls, text, who) {
   const box = $(boxId);
   const d = document.createElement('div');
   d.className = 'msg ' + cls;
+  if (!String(text || '').trim() && cls === 'assistant') d.classList.add('empty');
   if (who) { const w = document.createElement('div'); w.className = 'who'; w.textContent = who; d.appendChild(w); }
   const t = document.createElement('div');
   t.textContent = text;
@@ -842,7 +849,15 @@ function appendMsg(boxId, cls, text, who) {
   scrollBottom(boxId);
   return d;
 }
-function ensureLive(msgEl, cls, who) { return msgEl._text; }
+// text 为快照式全量：首次写入时若 live 气泡仍空且后面插入了 info/状态条，
+// 把气泡移到容器末尾（时序正确），并去掉 .empty 使其可见
+function ensureLive(msgEl, cls, who) {
+  if (msgEl.classList.contains('empty')) {
+    msgEl.classList.remove('empty');
+    if (msgEl.parentNode && msgEl.parentNode.lastElementChild !== msgEl) msgEl.parentNode.appendChild(msgEl);
+  }
+  return msgEl._text;
+}
 function scrollBottom(id) { const b = $(id); b.scrollTop = b.scrollHeight; }
 $('innerInput').addEventListener('keydown', e => { if (e.key === 'Enter') innerSend(); });
 $('outerInput').addEventListener('keydown', e => { if (e.key === 'Enter') outerSend(); });
