@@ -339,7 +339,7 @@ async function main() {
     } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg, isMultiStepTask, READONLY_PLUGINS } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg, isMultiStepTask, READONLY_PLUGINS, pairSafeTail } = require(path.join(ROOT, 'lib', 'inner'));
   const { preflight, pluginScores } = require(path.join(ROOT, 'lib', 'regression'));
   await t('regression 预检：坏结构插件被拦截（params/run 缺失、第三方模块、语法错）', async () => {
     const bad = await preflight([{ action: 'create', plugin: 't-bad', code: 'module.exports = { run: "x" };' }]);
@@ -712,6 +712,110 @@ async function main() {
       tasks: [{ description: '好的' }, { description: '坏的' }]
     }, { ...ctx, spawnSub: async (desc) => { if (desc === '坏的') throw new Error('子任务超时'); return '结论'; } });
     assert.ok(partial.includes('1/2') && partial.includes('[失败]'), partial.slice(0, 120));
+  });
+  await t('subagent 可写声明：tasks[].writable 透传 spawnSub 第二参（v0.9.12 P1-6）', async () => {
+    const got = [];
+    await plugins.runPlugin('subagent', {
+      tasks: [{ description: '只读调研' }, { description: '产出文件', writable: true }]
+    }, { ...ctx, spawnSub: async (desc, w) => { got.push([desc, w]); return '结论'; } });
+    assert.equal(got.length, 2, '两个子任务都派生');
+    assert.equal(got[0][1], false, '未声明 writable 默认只读');
+    assert.equal(got[1][1], true, 'writable:true 透传为 true');
+  });
+
+  // ===== 长程任务成熟度（v0.9.12）：配对安全裁剪 / 每轮落盘 / 自动续航 =====
+  await t('pairSafeTail：切点回退到安全边界，落盘副本无悬空 tool（P0-1）', () => {
+    const u = c => ({ role: 'user', content: c });
+    const pair = (id, res) => [
+      { role: 'assistant', content: null, tool_calls: [{ id, type: 'function', function: { name: 'read', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: id, content: res }
+    ];
+    // 短列表原样返回
+    const short = [u('q'), ...pair('a', 'r'), u('done')];
+    assert.equal(pairSafeTail(short, 10), short, '未超限原样返回');
+    // 切点恰落在配对中间：构造 7 条，maxKeep=4 → 原切点 index 3 是 tool（悬空），必须前移
+    const msgs = [u('q1'), ...pair('t1', 'r1'), u('q2'), ...pair('t2', 'r2')];
+    const tail = pairSafeTail(msgs, 4);
+    assert.ok(tail.length <= 4, `裁剪后不超过 maxKeep（实际 ${tail.length}）`);
+    assert.equal(tail[0].role, 'user', `切点回退到安全边界（实际首条 ${tail[0].role}）`);
+    // 通用配对完整性：每条 tool 前必有带对应 tool_calls 的 assistant，tool_calls 后必跟 tool
+    const hosts = new Set();
+    for (let i = 0; i < tail.length; i++) {
+      const m = tail[i];
+      if (m.role === 'assistant' && m.tool_calls) m.tool_calls.forEach(c => hosts.add(c.id));
+      if (m.role === 'tool') assert.ok(hosts.has(m.tool_call_id), `第 ${i} 条 tool 的宿主 assistant 必须在副本内`);
+    }
+    for (const id of hosts) assert.ok(tail.some(m => m.role === 'tool' && m.tool_call_id === id), 'tool_calls 宿主的结果必须在副本内');
+  });
+  await t('onRound 回调：每轮工具调用后被调用（崩溃即丢全程的反证，P0-2）', async () => {
+    const origFetch = globalThis.fetch;
+    let calls = 0;
+    const seenLens = [];
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls >= 3) return sseResponse([JSON.stringify({ choices: [{ delta: { content: '完成' } }] }), '[DONE]']);
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'o' + calls, function: { name: 'read', arguments: '{"path":"f"}' } }] } }] }),
+        '[DONE]'
+      ]);
+    };
+    try {
+      await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: 'hi' }], [],
+        async () => 'ok', () => {},
+        { onRound: (r, msgs) => { seenLens.push([r, msgs.length]); } });
+      assert.equal(seenLens.length, 2, `两轮工具调用各触发一次（实际 ${seenLens.length}）`);
+      assert.ok(seenLens[1][1] > seenLens[0][1], '回调拿到增长中的 messages（可即时落盘）');
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('自动续航：段上限+清单未完注入续航消息，总预算封顶（P0-3）', async () => {
+    const origFetch = globalThis.fetch;
+    let calls = 0;
+    const events = [];
+    globalThis.fetch = async () => {
+      calls += 1;
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c' + calls, function: { name: 'read', arguments: '{"path":"f"}' } }] } }] }),
+        '[DONE]'
+      ]);
+    };
+    try {
+      const messages = [{ role: 'user', content: '长任务' }];
+      const out = await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, messages, [],
+        async () => 'ok', e => events.push(e),
+        { maxRounds: 2, shouldContinue: () => true });
+      assert.equal(calls, 6, `默认总预算 3×2=6 轮（实际 ${calls}）`);
+      assert.ok(messages.some(m => m.role === 'user' && String(m.content).includes('[自动续航]')), '续航 user 消息入列');
+      assert.ok(events.some(e => e.type === 'info' && /自动续航/.test(e.text)), '续航 info 事件告知前端');
+      assert.ok(/累计 6\/6/.test(out), '结束语报告累计轮数');
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('自动续航：shouldContinue 为 false 或缺省时不续航（行为不回归）', async () => {
+    const origFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'd' + calls, function: { name: 'read', arguments: '{"path":"f"}' } }] } }] }),
+        '[DONE]'
+      ]);
+    };
+    try {
+      await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: 'x' }], [],
+        async () => 'ok', () => {},
+        { maxRounds: 2, shouldContinue: () => false });
+      assert.equal(calls, 2, `清单无未完成项 → 段上限即停（实际 ${calls}）`);
+      await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: 'y' }], [],
+        async () => 'ok', () => {}, { maxRounds: 2 });
+      assert.equal(calls, 4, '未传 shouldContinue 照旧 maxRounds 停');
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('静态防回归：日期注入 / 子级只读硬拦截 / 里程碑记忆接线（P1-4/P1-5/P1-6）', () => {
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    assert.ok(/\{TODAY\}/.test(srv) && /buildInnerSystemPrompt\(\)/.test(srv), '系统提示含 {TODAY} 且会话首条每次重建');
+    assert.ok(/name === 'write' \|\| name === 'edit'/.test(srv), '子级未声明 writable 时 write/edit 执行层硬拦截');
+    assert.ok(/只写子任务指定的目标路径/.test(srv), '可写版子级系统提示存在');
+    assert.ok(/milestoneWatch/.test(srv) && /里程碑完成/.test(srv), 'todo.toggle 完成项自动写里程碑记忆');
+    assert.ok(/onRound: \(\) => persistInnerMessages\(\)/.test(srv), '每轮落盘接线（P0-2 server 侧）');
   });
 
   // ===== 多路 LLM API profile（v0.9.6）：子智能体轮转分摊速率限制 =====

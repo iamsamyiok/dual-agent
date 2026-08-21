@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.11';
+const APP_VERSION = '0.9.12';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -20,7 +20,7 @@ fs.mkdirSync(WS_ROOT, { recursive: true });
 const plugins = require('./lib/plugins');
 const approval = require('./lib/approval');
 const outerMod = require('./lib/outer');
-const { chatInner, isMultiStepTask } = require('./lib/inner');
+const { chatInner, isMultiStepTask, pairSafeTail } = require('./lib/inner');
 const { validProfiles, pickProfile } = require('./lib/profiles');
 const { NET_CODES } = require('./lib/llmRetry');
 
@@ -165,7 +165,11 @@ function loadInnerMessages() {
   }
 }
 function persistInnerMessages() {
-  try { fs.writeFileSync(wsMsgPath(), JSON.stringify(innerMessages.slice(-60), null, 1)); }
+  try {
+    // 配对安全裁剪（v0.9.12 P0-1）：slice(-60) 切点落在 tool_calls 与 tool 结果之间
+    // 会落盘悬空配对，下次调 API 直接 400 且无法自愈
+    fs.writeFileSync(wsMsgPath(), JSON.stringify(pairSafeTail(innerMessages, 60), null, 1));
+  }
   catch (e) { console.log('[persist] 内层会话落盘失败:', e && e.message || e); } // 关键写失败必须可见
 }
 function clearInnerMessages() { innerMessages.length = 0; persistInnerMessages(); }
@@ -213,8 +217,15 @@ async function opencodeRunner() {
 }
 
 // 内层系统提示：针对真实模型实测暴露的三类问题（并行调用丢参数、超长参数传输截断、oldText 凭记忆编写）
-const INNER_SYSTEM_PROMPT = [
-  '你是内层执行 Agent，通过调用插件完成任务，完成后用简洁中文总结。',
+// 日期注入（v0.9.12 P1-5）：模型无实时感知，搜索"最新"数据时只能瞎猜年份——
+// 上次调研任务搜 2024/2025 过时数据即此病根。每次构造提示时注入当天日期与星期
+function buildInnerSystemPrompt() {
+  const now = new Date();
+  const dateStr = `${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日（星期${'日一二三四五六'[now.getDay()]}）`;
+  return INNER_SYSTEM_PROMPT_BASE.replace('{TODAY}', dateStr);
+}
+const INNER_SYSTEM_PROMPT_BASE = [
+  '你是内层执行 Agent，通过调用插件完成任务，完成后用简洁中文总结。当前日期：{TODAY}（涉及"最新/近期"的搜索与判断以此为准）。',
   '',
   '## 任务执行前必须：',
   '1. 先调用 memory.search(query="任务关键词") 检索相关记忆，将结果作为背景参考',
@@ -430,8 +441,9 @@ const server = http.createServer(async (req, res) => {
         pendingText = '';
       };
       // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）
-      if (innerMessages[0] && innerMessages[0].role === 'system') innerMessages[0].content = INNER_SYSTEM_PROMPT;
-      else innerMessages.unshift({ role: 'system', content: INNER_SYSTEM_PROMPT });
+      // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）；每次重建注入当天日期
+      if (innerMessages[0] && innerMessages[0].role === 'system') innerMessages[0].content = buildInnerSystemPrompt();
+      else innerMessages.unshift({ role: 'system', content: buildInnerSystemPrompt() });
       // 多步任务检测 → 注入 todo 提醒到 user 消息尾部（实测 agnes-2.5-flash 无视 system 程序指令，
       // 但对紧邻任务文本遵循度高；注入落盘，历史中形成使用示范）
       let finalMsg = message;
@@ -482,22 +494,33 @@ const server = http.createServer(async (req, res) => {
       const SUB_MAX_ROUNDS = 8;
       const SUB_RETRY_BASE_MS = 1500;
       const SUB_RR = { n: 0 }; // 轮转计数器：跨子任务递增，均匀分摊
-      const SUB_SYSTEM_PROMPT = [
+      const SUB_SYSTEM_BASE = [
         '你是子智能体，负责独立完成一个调研/探索型子任务并返回结论。',
         '规则：1) 直接执行，不要建 todo 清单；2) 结论必须自包含（数字/路径/关键原文），主会话看不到你的中间过程；',
         '3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件；4) 结论 ≤300 字，先给结果再给一句依据；',
         '5) 你的默认工作目录是 Agent 工作区（通常只有日志文件）。调研目标文件不存在时，先用 bash pwd/ls 定位实际路径',
         '（项目源码常在仓库根，如 /workspace/dual-agent），用绝对路径访问，禁止一击不中就宣称"文件不存在"。'
       ].join('\n');
+      // 可写版提示（v0.9.12 P1-6）：长任务的独立产出型子任务（改互不相同的文件）可委托子级并行写
+      const SUB_SYSTEM_WRITABLE = SUB_SYSTEM_BASE
+        .replace('负责独立完成一个调研/探索型子任务并返回结论', '负责独立完成一个产出型子任务（含写文件）并返回执行结果')
+        .replace('3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件', '3) 本任务授权写文件：用 write/edit 产出目标文件，写完必须 read 回验关键内容后才算完成')
+        + '\n6) 只写子任务指定的目标路径，禁止改动其他文件；产出后结论里报告写入路径与行数。';
       const isTransientErr = e => !!(e && (e.retryable || (e.code && NET_CODES.test(e.code))));
       // 病根教训（v0.9.7 压测抓出）：runSubOnce 独立函数，description 必须显式传参——
       // 闭包只共享模块级变量，外层 spawnSub 的参数不在其作用域内（当时 ReferenceError 致 4 路全灭）
-      const runSubOnce = async (picked, description) => {
+      // writable（v0.9.12 P1-6）：执行层硬拦截——false 时子级 write/edit 调用直接拒绝（系统提示约束之外的保险丝）
+      const runSubOnce = async (picked, description, writable) => {
         const subMessages = [
-          { role: 'system', content: SUB_SYSTEM_PROMPT },
+          { role: 'system', content: writable ? SUB_SYSTEM_WRITABLE : SUB_SYSTEM_BASE },
           { role: 'user', content: String(description) }
         ];
         const subCallPlugin = async (name, args) => {
+          if (!writable && (name === 'write' || name === 'edit')) {
+            const msg = `插件 ${name} 调用被拒绝：本子任务为只读探索型（未声明 writable），禁止写文件。如需产出文件，在结论中说明方案由主会话执行。`;
+            appendInnerLog({ ts: Date.now(), plugin: name, args, ok: false, result: msg.slice(0, 400), ms: 0, sub: true, profile: picked.name });
+            return msg;
+          }
           const t0 = Date.now();
           const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR }); // 无 spawnSub：子级禁止嵌套
           appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0, sub: true, profile: picked.name });
@@ -508,16 +531,16 @@ const server = http.createServer(async (req, res) => {
           ev => handleEvent({ ...ev, sub: true, tag: ev.type === 'usage' ? picked.name : ev.tag }),
           { maxRounds: SUB_MAX_ROUNDS, tag: picked.name, retryBaseMs: SUB_RETRY_BASE_MS });
       };
-      const spawnSub = async (description) => {
+      const spawnSub = async (description, writable) => {
         const picked = pickProfile(cfg, SUB_RR);
         try {
-          return await runSubOnce(picked, description);
+          return await runSubOnce(picked, description, writable);
         } catch (e) {
           if (!isTransientErr(e)) throw e; // 非限流/网络类错误（如 401 配置错）不换路重跑
           const fallback = pickProfile(cfg, SUB_RR); // 换下一路（轮转计数器已前进）
           if (fallback.name === picked.name) throw e; // 无其他路可换
           handleEvent({ type: 'info', text: `子任务@${picked.name} 限流重试耗尽，failover 换路 @${fallback.name} 重跑` });
-          return await runSubOnce(fallback, description);
+          return await runSubOnce(fallback, description, writable);
         }
       };
       // 搜索循环止损（v0.9.9 病根：真实调研会话 20 次同质搜索零有效结果，烧 183k prompt）：
@@ -545,22 +568,58 @@ const server = http.createServer(async (req, res) => {
       };
       // 动态清单注记：每轮 API 调用前取最新 todo 状态注入发送副本（落盘干净）——
       // 对标 Claude Code TodoList 的「执行中可见」，模型无需 todo.list 也能对齐进度、发现偏差即修订
-      const todoNote = () => {
+      const readTodo = () => {
         try {
           const arr = JSON.parse(fs.readFileSync(path.join(WS_DIR, '.todo.json'), 'utf8'));
-          if (!Array.isArray(arr) || !arr.length) return '';
-          const open = arr.filter(t => !t.done);
-          const done = arr.filter(t => t.done);
-          const lines = ['[任务清单] 当前进度（执行中发现计划不适用必须修订：todo.add 加步骤/调整后再继续）：'];
-          for (const t of open) lines.push(`- [ ] #${t.id} ${t.text}`);
-          const recentDone = done.slice(-3);
-          for (const t of recentDone) lines.push(`- [x] #${t.id} ${t.text}`);
-          if (done.length > recentDone.length) lines.push(`- （另有 ${done.length - recentDone.length} 项已完成略）`);
-          return lines.join('\n');
-        } catch { return ''; }
+          return Array.isArray(arr) ? arr : [];
+        } catch { return []; }
+      };
+      const todoNote = () => {
+        const arr = readTodo();
+        if (!arr.length) return '';
+        const open = arr.filter(t => !t.done);
+        const done = arr.filter(t => t.done);
+        const lines = ['[任务清单] 当前进度（执行中发现计划不适用必须修订：todo.add 加步骤/调整后再继续）：'];
+        for (const t of open) lines.push(`- [ ] #${t.id} ${t.text}`);
+        const recentDone = done.slice(-3);
+        for (const t of recentDone) lines.push(`- [x] #${t.id} ${t.text}`);
+        if (done.length > recentDone.length) lines.push(`- （另有 ${done.length - recentDone.length} 项已完成略）`);
+        return lines.join('\n');
+      };
+      // 自动续航判定（v0.9.12 P0-3）：清单存在且有未完成项 → 撞段上限时值得续航
+      const shouldContinue = () => readTodo().some(t => !t.done);
+      // 里程碑记忆（v0.9.12 P1-4）：todo.toggle 把一项从待办变为完成时自动 memory.save
+      // 进度摘要——长任务后段上下文被预算折叠时，早期决策依据可从记忆召回。
+      // 病根：memory.save 全靠模型自觉，实测长任务后段"忘了自己为什么这么做"
+      let prevDoneIds = new Set(readTodo().filter(t => t.done).map(t => t.id));
+      const milestoneWatch = (name, args) => {
+        if (name !== 'todo' || !args || String(args.action) !== 'toggle') return;
+        try {
+          const arr = readTodo();
+          const nowDone = arr.filter(t => t.done);
+          const fresh = nowDone.filter(t => !prevDoneIds.has(t.id));
+          prevDoneIds = new Set(nowDone.map(t => t.id));
+          for (const t of fresh) {
+            plugins.runPlugin('memory', {
+              action: 'save', level: 'short',
+              content: `里程碑完成：#${t.id} ${t.text}（剩余 ${arr.filter(x => !x.done).length} 项未完成）`,
+              tags: ['进度']
+            }, { cwd: WS_DIR, dataDir: DATA_DIR }).catch(() => {});
+          }
+        } catch { /* 记忆失败不阻断任务 */ }
+      };
+      const callPluginWrapped = async (name, args) => {
+        const result = await callPlugin(name, args); // 先执行（toggle 落盘后再对比，否则读到旧状态）
+        milestoneWatch(name, args);
+        return result;
       };
       try {
-        await chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPlugin, handleEvent, { todoNote });
+        await chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
+          todoNote,
+          shouldContinue,
+          // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
+          onRound: () => persistInnerMessages()
+        });
         flushText();
         persistInnerMessages();
         send({ type: 'done' });

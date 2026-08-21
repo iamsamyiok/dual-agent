@@ -18,7 +18,8 @@ module.exports = {
         items: {
           type: 'object',
           properties: {
-            description: { type: 'string', description: '子任务完整指令（自包含：目标+路径+输出格式）' }
+            description: { type: 'string', description: '子任务完整指令（自包含：目标+路径+输出格式）' },
+            writable: { type: 'boolean', description: '默认 false 只读探索。true 允许该子任务写文件（write/edit）——仅用于目标文件互不相同的独立产出型子任务，且描述必须写明目标路径' }
           },
           required: ['description']
         }
@@ -37,7 +38,7 @@ module.exports = {
     if (!tasks.length) throw new Error('tasks 为空（每个子任务需要 description）');
 
     const t0 = Date.now();
-    const settled = await Promise.allSettled(tasks.map(t => ctx.spawnSub(String(t.description))));
+    const settled = await Promise.allSettled(tasks.map(t => ctx.spawnSub(String(t.description), !!(t && t.writable))));
     const lines = [];
     let okCount = 0;
     settled.forEach((r, i) => {
