@@ -1,9 +1,12 @@
 // @name search
-// @desc 联网搜索并返回结果列表（标题+URL+摘要；免 key 多引擎自动降级，配 DUAL_AGENT_SEARCH_KEY 后优先走 Serper 正式接口）
+// @desc 联网搜索并返回结果列表（标题+URL+摘要；AnySearch 匿名通道优先，多引擎评分择优，配 DUAL_AGENT_SEARCH_KEY 后优先走 Serper）
 // @essential false
-// 设计参考 agent-reach 的免 key 哲学：无 key 时走公开通道（Bing → DuckDuckGo 自动降级），
-// 有 key 时自动升级正式接口；本插件只负责"搜索"，打开网页用 fetch（职责正交）。
+// 设计参考 agent-reach 的免 key 哲学 + anysearch skill 的匿名/key 池机制：
+// AnySearch API 匿名可用，402 配额耗尽时响应体自动发放 api_key（存本地轮换复用）；
+// 无任何 key 时走公开通道评分择优（AnySearch → Bing → 百度 → DDG）；本插件只负责"搜索"。
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+const ANYSEARCH_API = 'https://api.anysearch.com/v1/search';
+const ANYSEARCH_KEYS_FILE = 'anysearch-keys.json'; // 存 dataDir（.data 已 gitignore）
 
 function decodeEnt(s) {
   return String(s || '')
@@ -22,6 +25,92 @@ async function httpGet(url, headers, ms) {
     const resp = await fetch(url, { signal: ac.signal, redirect: 'follow', headers });
     return { status: resp.status, body: await resp.text() };
   } finally { clearTimeout(timer); }
+}
+async function httpPostJson(url, body, headers, ms) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    const resp = await fetch(url, { method: 'POST', signal: ac.signal, headers, body: JSON.stringify(body) });
+    const text = await resp.text();
+    return { status: resp.status, body: text };
+  } finally { clearTimeout(timer); }
+}
+
+// ---------- 引擎 0：AnySearch（匿名免费通道，v0.9.11 借鉴 anysearch skill） ----------
+// 实测（2026-08）：匿名直连 200，中英文长尾查询质量高（直接命中真信源）；
+// 配额耗尽（402）时响应体自动发放新 api_key——提取存本地 key 池轮换复用。
+// key 池：dataDir/anysearch-keys.json，[{key,status:active|exhausted,call_count,...}]
+// 环境变量 DUAL_AGENT_ANYSEARCH_KEY 可手动注入。key 值永不写入日志/返回文本。
+let _asKeysCache = null; // { mtime, keys } 进程内缓存
+function anysearchLoadKeys(dataDir) {
+  if (!dataDir) return [];
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const f = path.join(dataDir, ANYSEARCH_KEYS_FILE);
+    const st = fs.statSync(f);
+    if (_asKeysCache && _asKeysCache.mtime === st.mtimeMs) return _asKeysCache.keys;
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const keys = Array.isArray(j.keys) ? j.keys.filter(k => k && k.key && k.status !== 'exhausted') : [];
+    _asKeysCache = { mtime: st.mtimeMs, keys };
+    return keys;
+  } catch { return []; }
+}
+function anysearchSaveKey(dataDir, newKey) {
+  if (!dataDir || !/^as_/.test(String(newKey || ''))) return; // 只存 anysearch 形态的 key
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const f = path.join(dataDir, ANYSEARCH_KEYS_FILE);
+    let j = { keys: [] };
+    try { j = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { /* 首次 */ }
+    if (!Array.isArray(j.keys)) j.keys = [];
+    if (j.keys.some(k => k.key === newKey)) return; // 去重
+    j.keys.push({ key: newKey, status: 'active', source: 'auto_402', added_at: new Date().toISOString(), call_count: 0 });
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(f, JSON.stringify(j, null, 1));
+    try { fs.chmodSync(f, 0o600); } catch { /* 非 POSIX */ }
+    _asKeysCache = null; // 失效缓存
+  } catch { /* key 持久化失败不阻断搜索 */ }
+}
+function extractIssuedKey(body) {
+  try {
+    const j = JSON.parse(body);
+    return j.api_key || (j.credentials || {}).api_key || (j.data || {}).api_key || '';
+  } catch { return ''; }
+}
+async function anysearchEngine(query, count, ctx) {
+  const dataDir = ctx && ctx.dataDir;
+  const pool = [
+    ...anysearchLoadKeys(dataDir),
+    ...(process.env.DUAL_AGENT_ANYSEARCH_KEY ? [{ key: process.env.DUAL_AGENT_ANYSEARCH_KEY }] : [])
+  ];
+  const attempts = pool.length ? pool.map(k => k.key) : [null]; // 有 key 先用，匿名兜底
+  for (const key of [...attempts, null]) { // 末尾再补一次匿名（key 全挂时兜底）
+    const headers = { 'Content-Type': 'application/json', 'User-Agent': 'AnySearch-Skill/1.0' };
+    if (key) headers.Authorization = `Bearer ${key}`;
+    const r = await httpPostJson(ANYSEARCH_API, { query, max_results: Math.max(count, 5) }, headers, 12000);
+    if (r.status === 200) {
+      try {
+        const j = JSON.parse(r.body);
+        const data = j.data || j;
+        const items = (data.results || data.items || []).filter(x => x && (x.title || x.url));
+        if (!items.length) return null;
+        return items.slice(0, count).map(x => ({
+          title: String(x.title || '').trim(),
+          url: String(x.url || x.link || '').trim(),
+          snippet: String(x.description || x.content || x.snippet || '').trim().slice(0, 300)
+        }));
+      } catch { return null; }
+    }
+    if (r.status === 402 || r.status === 401 || r.status === 429) {
+      const issued = extractIssuedKey(r.body); // 402 自动发放：提取存池，下轮 attempts 已覆盖不到则下次生效
+      if (issued) anysearchSaveKey(dataDir, issued);
+      continue; // 换下一个 key / 匿名重试
+    }
+    return null; // 其他状态码（5xx/网络）：本引擎放弃，交由后续引擎
+  }
+  return null;
 }
 
 // ---------- 引擎 1：Serper（可选 key 升级通道；Google 官方结果质量最高） ----------
@@ -152,19 +241,21 @@ module.exports = {
     },
     required: ['query']
   },
-  run: async (args) => {
+  run: async (args, ctx) => {
     const query = String(args.query || '').trim();
     if (!query) throw new Error('query 为空：请提供搜索关键词');
     const count = Math.min(10, Math.max(1, Number(args.count) || 5));
-    // 引擎链：有 key 走 Serper（Google 结果）→ Bing → 百度 → DDG。
+    // 引擎链（v0.9.11）：Serper（有 key，Google 结果）→ AnySearch（匿名免费，中英文质量高）
+    // → Bing → 百度 → DDG。
     // 择优逻辑（v0.9.9）：引擎返回后先评分，低于阈值不短路——继续跑备选引擎，
     // 取分数高者返回；首引擎质量达标则与旧版行为一致（省请求）。
-    // 百度放 Bing 后：中文长尾查询 Bing 分词降级时百度常直接命中（真实调研病根）
+    // AnySearch 匿名直连实测质量优于所有爬虫引擎，放免 key 链首
     const chain = [
-      ['serper', serperEngine],
-      ['bing', bingEngine],
-      ['baidu', baiduEngine],
-      ['duckduckgo', ddgEngine]
+      ['serper', (q, c) => serperEngine(q, c)],
+      ['anysearch', (q, c) => anysearchEngine(q, c, ctx)],
+      ['bing', (q, c) => bingEngine(q, c)],
+      ['baidu', (q, c) => baiduEngine(q, c)],
+      ['duckduckgo', (q, c) => ddgEngine(q, c)]
     ];
     const errors = [];
     let best = null; // { name, results, score }

@@ -898,6 +898,47 @@ async function main() {
       assert.ok(/禁止开启新探索线/.test(String(bodies[4].messages.at(-1).content)), '注入收敛指令');
     } finally { globalThis.fetch = origFetch; }
   });
+
+  // ===== AnySearch 引擎与 key 池（v0.9.11 借鉴 anysearch skill）=====
+  await t('anysearch 402 自动发 key：提取存池，重试用新 key', async () => {
+    const os = require('os');
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-key-'));
+    const origFetch = globalThis.fetch;
+    let calls = [];
+    globalThis.fetch = async (u, init) => {
+      calls.push({ auth: (init.headers || {}).Authorization || '', body: init.body });
+      const n = calls.length;
+      if (n === 1) return new Response(JSON.stringify({ code: 402, api_key: 'as_sk_test123' }), { status: 402 });
+      // 第二次起（匿名重试或新 key）返回成功
+      return new Response(JSON.stringify({ data: { results: [{ title: 'Result for ' + JSON.parse(init.body).query, url: 'https://ok.example/' + n, description: 'snippet' }] } }), { status: 200 });
+    };
+    try {
+      const r = await searchMod.run({ query: '测试查询词', count: 3 }, { dataDir });
+      assert.ok(/via anysearch/.test(r), '走 anysearch 引擎：' + r.slice(0, 60));
+      assert.ok(calls.length >= 2, '402 后有重试（实际 ' + calls.length + ' 次）');
+      // key 已存池
+      const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'anysearch-keys.json'), 'utf8'));
+      assert.ok(saved.keys.some(k => k.key === 'as_sk_test123' && k.source === 'auto_402'), '发放的 key 存入本地池');
+      // key 值不得出现在搜索结果文本中（防泄漏）
+      assert.ok(!/as_sk_test123/.test(r), 'key 不泄漏到结果文本');
+      // 第二次调用自动带新 key
+      const r2 = await searchMod.run({ query: '测试查询词二', count: 3 }, { dataDir });
+      assert.ok(calls[calls.length - 1] && calls[calls.length - 1].auth === 'Bearer as_sk_test123', '池中 key 被后续调用复用');
+      assert.ok(!/as_sk_test123/.test(r2), '第二次结果同样不泄漏 key');
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('anysearch 非 as_ 前缀的伪 key 不入池（防响应投毒）', () => {
+    const os = require('os');
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'as-poison-'));
+    const path0 = path.join(dataDir, 'anysearch-keys.json');
+    // 直接调用内部函数验证（通过 402 响应路径）
+    const origFetch = globalThis.fetch;
+    return (async () => {
+      globalThis.fetch = async () => new Response(JSON.stringify({ api_key: 'sk-poisoned-xyz' }), { status: 402 });
+      try { await searchMod.run({ query: '测试x', count: 2 }, { dataDir }); } catch {}
+      assert.ok(!fs.existsSync(path0), '伪 key（非 as_ 前缀）不入池');
+    })().finally(() => { globalThis.fetch = origFetch; });
+  });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
     assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));
