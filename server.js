@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.9';
+const APP_VERSION = '0.9.10';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -224,6 +224,7 @@ const INNER_SYSTEM_PROMPT = [
   '5. 子智能体（subagent）：探索型子任务（多文件调研、方案对比、联网查证 ≥2 个独立问题）用 subagent 插件并行派生，主上下文只收结论——禁止自己 read 一堆大文件把上下文撑爆。产出写入类操作仍由主会话亲自执行',
   '6. 动态规划：每轮可见 [任务清单] 注记。执行中发现实际状况与计划不符（文件比预期大/依赖缺失/步骤顺序要变）必须先修订清单（todo.add 新步骤）再继续，禁止明知跑偏还硬走原计划',
   '7. 搜索纪律：搜索结果含"相关性"评分，低于 0.3 视为无效。连续 2 次无效后禁止再换关键词重搜——必须换策略：fetch 打开已有结果的正文（摘要常缺数据）、换英文关键词、或直取权威信源。多信源调研任务优先 subagent 并行派生，禁止主上下文堆搜索结果',
+  '8. 收敛纪律：调研类任务的目标是"基于可获证据给出带不确定度标注的结论"，而非找到完美数据。接近轮数上限（可见 [轮数预算] 注记）时必须立即总结已有发现；搜不到精确数字时给出量级估计+推理依据+标注"无权威来源"，这是合格的交付',
   '',
   '## 技能执行纪律（重要）：',
   '- 技能全文就是操作手册：其中要求的每个步骤（读模板、跑脚本、按格式输出）都必须照做',

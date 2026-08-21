@@ -874,6 +874,30 @@ async function main() {
     const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
     assert.ok(/止损提醒/.test(srv) && /subagent 派生/.test(srv), '止损文本存在且含 subagent 选项');
   });
+
+  await t('轮数预算注记：剩余 ≤25% 时注入收敛指令（防撞顶零结论）', async () => {
+    const origFetch = globalThis.fetch;
+    const bodies = [];
+    let round = 0;
+    globalThis.fetch = async (u, init) => {
+      round += 1;
+      bodies.push(JSON.parse(init.body));
+      if (round <= 5) return sseResponse([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 's' + round, function: { name: 'search', arguments: '{\"query\":\"x\"}' } }] } }] }),
+        '[DONE]'
+      ]);
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: '最终结论' } }] }), '[DONE]']);
+    };
+    try {
+      // maxRounds=6 → 剩余 2 轮（round 4/5）注入；round 0-3 不注入
+      const out = await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: '调研' }], [],
+        async () => '搜索「x」via bing（相关性 0.50），3 条结果：ok', () => {}, { maxRounds: 6 });
+      assert.equal(out, '最终结论');
+      const hasNote = bodies.map(b => b.messages.some(m => m.role === 'system' && /轮数预算/.test(String(m.content || ''))));
+      assert.deepEqual(hasNote, [false, false, false, false, true, true], '恰在剩余 2 轮时开始注入：' + JSON.stringify(hasNote));
+      assert.ok(/禁止开启新探索线/.test(String(bodies[4].messages.at(-1).content)), '注入收敛指令');
+    } finally { globalThis.fetch = origFetch; }
+  });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
     assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));
