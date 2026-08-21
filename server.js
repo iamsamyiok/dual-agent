@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.8';
+const APP_VERSION = '0.9.9';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -223,6 +223,7 @@ const INNER_SYSTEM_PROMPT = [
   '4. 产出验证纪律：任务产出文件后，禁止只凭"我写了"就宣称完成。收尾前用 verify 插件断言关键产出（exists + contains 文本特征 + line_count 行数），多规则一次调用；看到 FAIL 必须修复后重新 verify，直到 PASS 才能总结',
   '5. 子智能体（subagent）：探索型子任务（多文件调研、方案对比、联网查证 ≥2 个独立问题）用 subagent 插件并行派生，主上下文只收结论——禁止自己 read 一堆大文件把上下文撑爆。产出写入类操作仍由主会话亲自执行',
   '6. 动态规划：每轮可见 [任务清单] 注记。执行中发现实际状况与计划不符（文件比预期大/依赖缺失/步骤顺序要变）必须先修订清单（todo.add 新步骤）再继续，禁止明知跑偏还硬走原计划',
+  '7. 搜索纪律：搜索结果含"相关性"评分，低于 0.3 视为无效。连续 2 次无效后禁止再换关键词重搜——必须换策略：fetch 打开已有结果的正文（摘要常缺数据）、换英文关键词、或直取权威信源。多信源调研任务优先 subagent 并行派生，禁止主上下文堆搜索结果',
   '',
   '## 技能执行纪律（重要）：',
   '- 技能全文就是操作手册：其中要求的每个步骤（读模板、跑脚本、按格式输出）都必须照做',
@@ -518,12 +519,28 @@ const server = http.createServer(async (req, res) => {
           return await runSubOnce(fallback, description);
         }
       };
+      // 搜索循环止损（v0.9.9 病根：真实调研会话 20 次同质搜索零有效结果，烧 183k prompt）：
+      // search 返回文本头部带「相关性 X.XX」，连续 <0.3 计数递增、达标清零；
+      // ≥3 次时在结果尾部注入强制策略升级指令（fetch 信源/换英文/subagent），打断重复模式
+      let lowSearchStreak = 0;
       const callPlugin = async (name, args) => {
         const t0 = Date.now();
         const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR, spawnSub });
-        // 一次追加完整条目（含耗时），替代旧的“占位+回读覆写”两段式
+        let final = result;
+        if (name === 'search') {
+          const m = /相关性 ([0-9.]+)/.exec(String(result));
+          if (m) {
+            if (Number(m[1]) < 0.3) lowSearchStreak += 1; else lowSearchStreak = 0;
+            if (lowSearchStreak >= 3) {
+              final = result + `\n\n[止损提醒] 已连续 ${lowSearchStreak} 次低质量搜索——继续换关键词重搜大概率重复失败。` +
+                `必须换策略：A) fetch 打开本次最相关结果的页面读正文；B) 换英文关键词；C) 直取权威信源（官方博客/行业报告）；` +
+                `D) 多信源调研改用 subagent 派生。禁止再执行第 ${lowSearchStreak + 1} 次同模式 search。`;
+              lowSearchStreak = 0; // 提醒一次后重置，避免每条都带
+            }
+          }
+        }
         appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0 });
-        return result;
+        return final;
       };
       // 动态清单注记：每轮 API 调用前取最新 todo 状态注入发送副本（落盘干净）——
       // 对标 Claude Code TodoList 的「执行中可见」，模型无需 todo.list 也能对齐进度、发现偏差即修订

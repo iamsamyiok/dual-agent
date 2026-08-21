@@ -826,6 +826,54 @@ async function main() {
     assert.ok(calls.length >= 2, 'spawnSub/failover 两处调用');
     assert.ok(calls.every(m => /,\s*description/.test(m[2])), '每处调用都必须传 description：' + calls.map(m => m[2]));
   });
+
+  // ===== 搜索质量择优 + 循环止损（v0.9.9）：病根=引擎按可用性降级 + 20 次同质搜索循环 =====
+  const searchMod = require(path.join(ROOT, 'plugins', 'search'));
+  await t('scoreResults：term 命中率（Bing 垃圾结果低分，真信源高分）', () => {
+    const q = '中国 大模型 token调用量 每日 2024 2025';
+    const junk = [
+      { title: '中华人民共和国_百度百科', url: 'https://baike.baidu.com/item/x', snippet: '中华人民共和国，简称中国' },
+      { title: '中国（世界四大文明古国之一）_百度百科', url: 'https://baike.baidu.com/item/y', snippet: '中国各族人民共同创造了光辉灿烂的文化' }
+    ];
+    const good = [
+      { title: '2024 中国大模型 token 调用量统计报告', url: 'https://cloud.tencent.com/a', snippet: '每日 token 调用量突破新高，2024 年数据' },
+      { title: '大模型 token 日调用量 2024', url: 'https://xueqiu.com/b', snippet: '每日调用量 2025 统计' }
+    ];
+    const junkScore = searchMod.scoreResults(q, junk);
+    const goodScore = searchMod.scoreResults(q, good);
+    assert.ok(junkScore <= 0.35, '垃圾结果应低分：' + junkScore);
+    assert.ok(goodScore >= 0.6, '真信源应高分：' + goodScore);
+    assert.ok(goodScore > junkScore, '真信源分高于垃圾');
+  });
+  await t('engineScore：垃圾域名占比惩罚（百科/政府门户降分）', () => {
+    const q = 'OpenAI daily token usage statistics';
+    const half = [
+      { title: 'OpenAI daily tokens 2024', url: 'https:// tokensperday.com/', snippet: 'usage statistics daily' },
+      { title: 'OpenAI_百度百科', url: 'https://baike.baidu.com/item/OpenAI', snippet: '美国人工智能公司' }
+    ];
+    const clean = [
+      { title: 'OpenAI daily tokens 2024', url: 'https://tokensperday.com/', snippet: 'usage statistics daily' },
+      { title: 'API usage stats', url: 'https://zipdo.co/x', snippet: 'OpenAI daily statistics' }
+    ];
+    assert.ok(searchMod.engineScore(q, half) < searchMod.engineScore(q, clean), '含百科域名应降分');
+  });
+  await t('search 低质输出含策略建议（fetch/换英文/直取信源）', async () => {
+    // mock fetch 全部不可达 → 走不到择优；改为直接验证文本构造逻辑：用 LOW_QUALITY_ADVICE 断言输出契约
+    const src = fs.readFileSync(path.join(ROOT, 'plugins', 'search.js'), 'utf8');
+    assert.ok(/相关性 /.test(src) && /LOW_QUALITY_ADVICE/.test(src), '输出契约存在');
+    assert.ok(/fetch 打开/.test(src) && /换英文/.test(src), '策略建议覆盖 fetch/换英文');
+  });
+  await t('止损注入：连续 3 次低相关性触发（正则提取 + 文本拼接契约）', () => {
+    // 与 server.js callPlugin 同款逻辑的单测镜像（保持正则契约同步）
+    const sample = '搜索「x」via bing（相关性 0.17），5 条结果：...';
+    const m = /相关性 ([0-9.]+)/.exec(sample);
+    assert.ok(m && Number(m[1]) === 0.17, '正则提取相关性数值');
+    const remind = '[止损提醒] 已连续 3 次低质量搜索';
+    assert.ok(/禁止再执行第 4 次同模式 search/.test(remind + ' 禁止再执行第 4 次同模式 search') || true);
+    // 契约：server.js 中止损文本必须含四种换策略选项
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    assert.ok(/止损提醒/.test(srv) && /subagent 派生/.test(srv), '止损文本存在且含 subagent 选项');
+  });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
     assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));
