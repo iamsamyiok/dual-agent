@@ -297,6 +297,24 @@ async function main() {
     const n = await plugins.runPlugin('bash', { command: 'echo normal-output' }, ctx);
     assert.ok(!n.includes('重定向到文件'), n);
   });
+  await t('fetch 去噪：菜单剥离 + 数据短行保留（回归：丢弃块未清 buf 会吞后续短行）', async () => {
+    const http = require('http');
+    const menu = ['曼谷','东京','首尔','吉隆坡','新加坡','巴黎','罗马','伦敦','雅典','柏林','纽约','温哥华','墨西哥城','哈瓦那','圣何塞','巴西利亚','开普敦','维多利亚','悉尼','墨尔本'];
+    const weather = ['雷阵雨','雷阵雨','大雨转中雨','中雨','雷阵雨','雷阵雨','大雨转小雨'];
+    const days = weather.map((w, i) => `<h1>${21 + i}日（周${'一二三四五六日'[i]}）</h1><p>${w}</p><p>3${i} / 2${i}℃</p>`).join('');
+    const html = `<html><head><title>惠州天气预报</title></head><body><div class="nav"><ul>${menu.map(c => `<li>${c}</li>`).join('')}</ul><p>首页 | 预报 | 预警 | 雷达 | 云图 | 天气地图 | 专业产品</p></div><div class="t">${days}</div></body></html>`;
+    const srv = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(html); });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const port = srv.address().port;
+    try {
+      const r = await plugins.runPlugin('fetch', { url: `http://127.0.0.1:${port}/` }, ctx);
+      assert.ok(r.includes('标题：惠州天气预报'), '标题应置顶：' + r.slice(0, 80));
+      assert.ok(r.includes('雷阵雨') && r.includes('大雨转中雨') && r.includes('中雨'), '天气词必须保留（僵尸 buf 回归）：' + r);
+      assert.ok(/21日（周一）\n雷阵雨/.test(r), '日期后应紧跟天气词');
+      assert.ok(!r.includes('东京') && !r.includes('首尔') && !r.includes('温哥华'), '城市菜单应被剥离');
+      assert.ok(!/首页 \| 预报/.test(r), '竖线导航行应被剥离');
+    } finally { srv.close(); }
+  });
 
   const approval = require(path.join(ROOT, 'lib', 'approval'));
   let badId = '', warnId = '';

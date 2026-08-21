@@ -102,7 +102,7 @@ module.exports = {
 
 ```bash
 node test/smoke.js
-# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（50 项断言）
+# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（51 项断言）
 ```
 
 ## 环境变量
