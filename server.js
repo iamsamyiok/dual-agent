@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.7';
+const APP_VERSION = '0.9.8';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -483,10 +483,14 @@ const server = http.createServer(async (req, res) => {
       const SUB_SYSTEM_PROMPT = [
         '你是子智能体，负责独立完成一个调研/探索型子任务并返回结论。',
         '规则：1) 直接执行，不要建 todo 清单；2) 结论必须自包含（数字/路径/关键原文），主会话看不到你的中间过程；',
-        '3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件；4) 结论 ≤300 字，先给结果再给一句依据。'
+        '3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件；4) 结论 ≤300 字，先给结果再给一句依据；',
+        '5) 你的默认工作目录是 Agent 工作区（通常只有日志文件）。调研目标文件不存在时，先用 bash pwd/ls 定位实际路径',
+        '（项目源码常在仓库根，如 /workspace/dual-agent），用绝对路径访问，禁止一击不中就宣称"文件不存在"。'
       ].join('\n');
       const isTransientErr = e => !!(e && (e.retryable || (e.code && NET_CODES.test(e.code))));
-      const runSubOnce = async (picked) => {
+      // 病根教训（v0.9.7 压测抓出）：runSubOnce 独立函数，description 必须显式传参——
+      // 闭包只共享模块级变量，外层 spawnSub 的参数不在其作用域内（当时 ReferenceError 致 4 路全灭）
+      const runSubOnce = async (picked, description) => {
         const subMessages = [
           { role: 'system', content: SUB_SYSTEM_PROMPT },
           { role: 'user', content: String(description) }
@@ -505,13 +509,13 @@ const server = http.createServer(async (req, res) => {
       const spawnSub = async (description) => {
         const picked = pickProfile(cfg, SUB_RR);
         try {
-          return await runSubOnce(picked);
+          return await runSubOnce(picked, description);
         } catch (e) {
           if (!isTransientErr(e)) throw e; // 非限流/网络类错误（如 401 配置错）不换路重跑
           const fallback = pickProfile(cfg, SUB_RR); // 换下一路（轮转计数器已前进）
           if (fallback.name === picked.name) throw e; // 无其他路可换
           handleEvent({ type: 'info', text: `子任务@${picked.name} 限流重试耗尽，failover 换路 @${fallback.name} 重跑` });
-          return await runSubOnce(fallback);
+          return await runSubOnce(fallback, description);
         }
       };
       const callPlugin = async (name, args) => {

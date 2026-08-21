@@ -816,6 +816,16 @@ async function main() {
     assert.ok(out.includes('1/2') === false || true, '计数格式不炸');
     assert.ok(/失败-限流\/网络/.test(out) && /稍后重试|缩小并发|主会话直接执行/.test(out), '给出可操作建议：' + out.slice(0, 150));
   });
+
+  await t('spawnSub 参数链静态防回归（v0.9.7 压测教训：拆函数断参 ReferenceError）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    const defs = [...src.matchAll(/runSubOnce = async \(picked([^)]*)\)/g)];
+    assert.ok(defs.length >= 1, 'runSubOnce 定义存在');
+    assert.ok(defs.every(m => /,\s*description/.test(m[1])), '定义必须显式接收 description：' + defs.map(m => m[1]));
+    const calls = [...src.matchAll(/runSubOnce\((picked|fallback)([^)]*)\)/g)];
+    assert.ok(calls.length >= 2, 'spawnSub/failover 两处调用');
+    assert.ok(calls.every(m => /,\s*description/.test(m[2])), '每处调用都必须传 description：' + calls.map(m => m[2]));
+  });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
     assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));
