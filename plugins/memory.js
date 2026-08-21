@@ -36,7 +36,7 @@ function allocId(file) {
   try { seq = Number(JSON.parse(fs.readFileSync(seqFp, 'utf8')).seq) || 0; } catch { /* 首次初始化 */ }
   const maxExisting = loadJSON(file, []).reduce((mx, m) => Math.max(mx, Number(m.id) || 0), 0);
   seq = Math.max(seq, maxExisting) + 1;
-  try { fs.writeFileSync(seqFp, JSON.stringify({ seq }), 'utf8'); } catch (e) { console.error('[memory] id 计数器落盘失败:', e && e.message || e); }
+  try { fs.mkdirSync(path.dirname(seqFp), { recursive: true }); fs.writeFileSync(seqFp, JSON.stringify({ seq }), 'utf8'); } catch (e) { console.error('[memory] id 计数器落盘失败:', e && e.message || e); }
   return seq;
 }
 
@@ -180,12 +180,16 @@ module.exports = {
     if (action === 'search') {
       const query = String(args.query || '').trim();
       if (!query) throw new Error('query 为空'); // 软失败统一 throw → 框架标记 ok=false
+      // 病根（v0.9.4 实测发现）：search 复用了 save 的 level 默认值 'short'，
+      // 模型把重要信息存 long 后不带 level 检索（最常见用法）→ 必然零命中，记忆像丢了一样。
+      // 检索的合理默认是跨库（all），显式传 level 才收窄。
+      const searchLevel = args.level !== undefined ? args.level : 'all';
 
       const pool = [];
-      if (level === 'short' || level === 'all') {
+      if (searchLevel === 'short' || searchLevel === 'all') {
         loadJSON(files.short, []).forEach(m => pool.push({ level: 'short', ...m }));
       }
-      if (level === 'long' || level === 'all') {
+      if (searchLevel === 'long' || searchLevel === 'all') {
         loadJSON(files.long, []).forEach(m => pool.push({ level: 'long', ...m }));
       }
       const ranked = searchRanked(query, pool);

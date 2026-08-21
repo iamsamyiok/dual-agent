@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.3';
+const APP_VERSION = '0.9.4';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -207,6 +207,7 @@ const INNER_SYSTEM_PROMPT = [
   '1. 先调用 memory.search(query="任务关键词") 检索相关记忆，将结果作为背景参考',
   '2. 调用 skill.list() 查看技能库（渐进式：list 只给名称+描述），发现与任务相关的技能必须 skill.get(name) 读全文并按其步骤执行',
   '3. 复杂任务必须先建任务清单：满足任一条件即算复杂——(a) 需要 ≥3 个执行步骤 (b) 涉及多个文件的创建/修改 (c) 用户消息含"然后/接着/再/最后"等多步标志。建法：每个步骤一次 todo.add(text="动宾短语")；此后每完成一步立即 todo.toggle(id=...) 勾选，开始下一步前如记不清进度就 todo.list() 查看；全部完成时清单应全为 [x]。禁止跳过建清单直接执行复杂任务',
+  '4. 产出验证纪律：任务产出文件后，禁止只凭"我写了"就宣称完成。收尾前用 verify 插件断言关键产出（exists + contains 文本特征 + line_count 行数），多规则一次调用；看到 FAIL 必须修复后重新 verify，直到 PASS 才能总结',
   '',
   '## 技能执行纪律（重要）：',
   '- 技能全文就是操作手册：其中要求的每个步骤（读模板、跑脚本、按格式输出）都必须照做',
@@ -417,8 +418,8 @@ const server = http.createServer(async (req, res) => {
       // 但对紧邻任务文本遵循度高；注入落盘，历史中形成使用示范）
       let finalMsg = message;
       if (isMultiStepTask(message)) {
-        finalMsg = message + '\n\n[框架提示] 本任务为多步任务。开始执行前必须先用 todo 插件建立任务清单（每个步骤一条 todo.add），此后每完成一步立即 todo.toggle(id=...) 勾选，全部完成时清单应全为 [x]。';
-        send({ type: 'info', text: '检测到多步任务，已注入任务清单提醒' });
+        finalMsg = message + '\n\n[框架提示] 本任务为多步任务，两项纪律：\n1) 开始执行前必须先用 todo 建任务清单（每个步骤一条 todo.add），每完成一步立即 todo.toggle(id=...)，全部完成时清单应全为 [x]。\n2) 收尾前必须用 verify 插件断言每个产出文件（exists + contains 内容特征 + line_count），看到 FAIL 先修复再重验，全 PASS 才能总结。';
+        send({ type: 'info', text: '检测到多步任务，已注入任务清单+产出验证提醒' });
       }
       innerMessages.push({ role: 'user', content: finalMsg });
       persistInnerMessages();

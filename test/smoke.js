@@ -122,6 +122,15 @@ async function main() {
     assert.ok(hit.includes('端口 3788'), hit);
     assert.ok(fs.existsSync(path.join(WS, '.memory-short.json')), '记忆应存工作区（随工作区隔离）');
   });
+  await t('memory 插件：save long 后不带 level 检索必须命中（跨库默认）', async () => {
+    // 回归（v0.9.4 实测发现）：search 曾复用 save 的默认 level='short'，
+    // 存 long 后不带 level 检索必然零命中——记忆像丢了一样
+    await plugins.runPlugin('memory', { action: 'save', content: '长期事实：网关地址是 example.com', tags: ['infra'], level: 'long' }, ctx);
+    const hit = await plugins.runPlugin('memory', { action: 'search', query: '网关' }, ctx);
+    assert.ok(hit.includes('example.com'), '不带 level 的 search 应跨库命中 long 记忆：' + hit);
+    const narrow = await plugins.runPlugin('memory', { action: 'search', query: '网关', level: 'short' }, ctx);
+    assert.ok(narrow.includes('没有匹配'), '显式 level=short 收窄仍可用：' + narrow);
+  });
   await t('memory 插件：单调 id（删除后新增不复用）+ 同标签追加不覆盖', async () => {
     const s1 = await plugins.runPlugin('memory', { action: 'save', content: '事实甲', tags: ['proj'] }, ctx);
     assert.ok(s1.includes('#2'), '前序用例已占 #1，本条应为 #2：' + s1); // #1 = 上一用例的"端口 3788"
@@ -141,6 +150,67 @@ async function main() {
     const b = await plugins.runPlugin('todo', { action: 'toggle', id: 1 }, ctx);
     assert.ok(b.includes('[x]'));
     await plugins.runPlugin('todo', { action: 'clear', mode: 'done' }, ctx);
+  });
+  await t('verify 插件：多规则一次断言（PASS/FAIL 框架判定）', async () => {
+    fs.writeFileSync(path.join(WS, 'v-target.txt'), 'alpha\nbeta\ngamma\n', 'utf8');
+    const pass = await plugins.runPlugin('verify', {
+      path: 'v-target.txt',
+      rules: [
+        { type: 'exists' },
+        { type: 'contains', text: 'beta' },
+        { type: 'not_contains', text: 'delta' },
+        { type: 'regex', pattern: 'gam[a-z]' },
+        { type: 'line_count', exact: 3 }
+      ]
+    }, ctx);
+    assert.ok(pass.includes('5/5 通过') && pass.includes('PASS'), pass);
+    const fail = await plugins.runPlugin('verify', {
+      path: 'v-target.txt',
+      rules: [
+        { type: 'contains', text: '不存在的内容' },
+        { type: 'exists' }
+      ]
+    }, ctx);
+    assert.ok(fail.includes('1/2 通过') && fail.includes('FAIL') && fail.includes('✗'), fail);
+  });
+  await t('verify regex：^$ 按行锚定（grep 语义，防误报）', async () => {
+    // 回归（v0.9.4 实测）：模型写 ^34$ 表达"末行为 34"，不带 m flag 是整串锚点 → 误报 FAIL
+    fs.writeFileSync(path.join(WS, 'v-anchor.txt'), '1\n5\n13\n34', 'utf8');
+    const ok = await plugins.runPlugin('verify', { path: 'v-anchor.txt', rules: [{ type: 'regex', pattern: '^34$' }] }, ctx);
+    assert.ok(ok.includes('1/1 通过') && ok.includes('PASS'), ok);
+    const head = await plugins.runPlugin('verify', { path: 'v-anchor.txt', rules: [{ type: 'regex', pattern: '^1$' }] }, ctx);
+    assert.ok(head.includes('PASS'), '首行锚定同样按行匹配');
+    const miss = await plugins.runPlugin('verify', { path: 'v-anchor.txt', rules: [{ type: 'regex', pattern: '^3$' }] }, ctx);
+    assert.ok(miss.includes('FAIL'), '非整行内容不应命中行锚点');
+  });
+  await t('verify 插件：json_valid + json_path 断言', async () => {
+    fs.writeFileSync(path.join(WS, 'v-cfg.json'), JSON.stringify({ name: 'dual-agent', inner: { model: 'agnes-2.5-flash' }, list: [10, 20] }), 'utf8');
+    const ok = await plugins.runPlugin('verify', {
+      path: 'v-cfg.json',
+      rules: [
+        { type: 'json_valid' },
+        { type: 'json_path', expr: 'inner.model', equals: 'agnes-2.5-flash' },
+        { type: 'json_path', expr: 'list.1', equals: 20 },
+        { type: 'json_path', expr: 'name' }
+      ]
+    }, ctx);
+    assert.ok(ok.includes('4/4 通过') && ok.includes('PASS'), ok);
+    const bad = await plugins.runPlugin('verify', {
+      path: 'v-cfg.json',
+      rules: [{ type: 'json_path', expr: 'inner.model', equals: 'wrong-model' }]
+    }, ctx);
+    assert.ok(bad.includes('FAIL') && bad.includes('期望'), bad);
+    fs.writeFileSync(path.join(WS, 'v-bad.json'), '{broken', 'utf8');
+    const inv = await plugins.runPlugin('verify', { path: 'v-bad.json', rules: [{ type: 'json_valid' }] }, ctx);
+    assert.ok(inv.includes('FAIL') && inv.includes('JSON 非法'), inv);
+  });
+  await t('verify 插件：不存在文件与空规则拒绝', async () => {
+    const miss = await plugins.runPlugin('verify', { path: 'no-such.txt', rules: [{ type: 'exists' }] }, ctx);
+    assert.ok(miss.includes('FAIL') && miss.includes('文件不存在'), miss);
+    // runPlugin 把插件 throw 转为错误字符串返回（软失败统一约定）
+    const empty = await plugins.runPlugin('verify', { path: 'x', rules: [] }, ctx);
+    assert.ok(empty.includes('至少提供 1 条'), empty);
+    assert.ok(/^插件 verify/.test(empty), '应被标记为失败调用：' + empty);
   });
   await t('skill 插件：save/get/非法名', async () => {
     await plugins.runPlugin('skill', { action: 'save', name: 't1', content: '# 标题' }, ctx);
