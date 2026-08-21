@@ -46,8 +46,13 @@ module.exports = {
         okCount += 1;
         lines.push(`${head}\n${String(r.value).slice(0, 1200)}`);
       } else {
-        const err = r.status === 'rejected' ? String(r.reason && r.reason.message || r.reason) : String(r.value).slice(0, 200);
-        lines.push(`${head}\n[失败] ${err}`);
+        const raw = r.status === 'rejected' ? String(r.reason && r.reason.message || r.reason) : String(r.value).slice(0, 200);
+        // 限流/网络类失败（含 failover 后仍失败）给主会话可操作建议，而非只报错
+        const isTransient = /rate.?limit|too many|429|quota|overload|限流|频率|ECONNRESET|ETIMEDOUT|fetch failed/i.test(raw);
+        const advice = isTransient
+          ? '\n[失败-限流/网络] 该路 API 持续限流（已自动退避重试并尝试换路）。建议：稍后重试此子任务，或缩小并发（一次派 1-2 个），或由主会话直接执行该调研。'
+          : '';
+        lines.push(`${head}\n[失败] ${raw}${advice}`);
       }
     });
     return `子智能体完成 ${okCount}/${tasks.length}（并行 ${tasks.length} 路，总耗时 ${Math.round((Date.now() - t0) / 1000)}s，结论已压缩，探索细节不占主上下文）：\n\n${lines.join('\n\n')}`;

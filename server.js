@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.6';
+const APP_VERSION = '0.9.7';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -22,6 +22,7 @@ const approval = require('./lib/approval');
 const outerMod = require('./lib/outer');
 const { chatInner, isMultiStepTask } = require('./lib/inner');
 const { validProfiles, pickProfile } = require('./lib/profiles');
+const { NET_CODES } = require('./lib/llmRetry');
 
 // ---------- 日志 tee ----------
 const LOG_PATH = path.join(DATA_DIR, 'server.log');
@@ -472,16 +473,20 @@ const server = http.createServer(async (req, res) => {
       // 子智能体派生（对标 Claude Code Task）：独立 messages 跑完整工具循环（8 轮上限），
       // 探索过程隔离在子上下文，主上下文只收结论。子级 ctx 不带 spawnSub → 无法再派生（深度 1）。
       // 多路 API（v0.9.6）：子任务轮转选择 inner_profiles 里的配置，并行请求分摊到不同端点，
-      // 避免同一 LLM API 的并发速率限制；未配置 profiles 时回退主配置（行为与旧版一致）
+      // 避免同一 LLM API 的并发速率限制；未配置 profiles 时回退主配置（行为与旧版一致）。
+      // 限流韧性（v0.9.7）：轮次级 withRetry 短退避（1.5s 序列，主会话的一半——子任务轻量，
+      // 快速把结果交回主会话决策优于长等）；轮次重试耗尽后任务级 failover：换下一路 profile
+      // 从头重跑一次（无多路配置时直接失败），限流不再死磕单端点
       const SUB_MAX_ROUNDS = 8;
+      const SUB_RETRY_BASE_MS = 1500;
       const SUB_RR = { n: 0 }; // 轮转计数器：跨子任务递增，均匀分摊
       const SUB_SYSTEM_PROMPT = [
         '你是子智能体，负责独立完成一个调研/探索型子任务并返回结论。',
         '规则：1) 直接执行，不要建 todo 清单；2) 结论必须自包含（数字/路径/关键原文），主会话看不到你的中间过程；',
         '3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件；4) 结论 ≤300 字，先给结果再给一句依据。'
       ].join('\n');
-      const spawnSub = async (description) => {
-        const picked = pickProfile(cfg, SUB_RR); // 轮转选路：profile 名随 usage 事件落盘（tag）
+      const isTransientErr = e => !!(e && (e.retryable || (e.code && NET_CODES.test(e.code))));
+      const runSubOnce = async (picked) => {
         const subMessages = [
           { role: 'system', content: SUB_SYSTEM_PROMPT },
           { role: 'user', content: String(description) }
@@ -494,7 +499,20 @@ const server = http.createServer(async (req, res) => {
         };
         const { chatInnerReal } = require('./lib/inner');
         return await chatInnerReal(picked.cfg, subMessages, plugins.toolDefs(), subCallPlugin,
-          ev => handleEvent({ ...ev, sub: true, tag: ev.type === 'usage' ? picked.name : ev.tag }), { maxRounds: SUB_MAX_ROUNDS, tag: picked.name });
+          ev => handleEvent({ ...ev, sub: true, tag: ev.type === 'usage' ? picked.name : ev.tag }),
+          { maxRounds: SUB_MAX_ROUNDS, tag: picked.name, retryBaseMs: SUB_RETRY_BASE_MS });
+      };
+      const spawnSub = async (description) => {
+        const picked = pickProfile(cfg, SUB_RR);
+        try {
+          return await runSubOnce(picked);
+        } catch (e) {
+          if (!isTransientErr(e)) throw e; // 非限流/网络类错误（如 401 配置错）不换路重跑
+          const fallback = pickProfile(cfg, SUB_RR); // 换下一路（轮转计数器已前进）
+          if (fallback.name === picked.name) throw e; // 无其他路可换
+          handleEvent({ type: 'info', text: `子任务@${picked.name} 限流重试耗尽，failover 换路 @${fallback.name} 重跑` });
+          return await runSubOnce(fallback);
+        }
       };
       const callPlugin = async (name, args) => {
         const t0 = Date.now();

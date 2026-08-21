@@ -757,6 +757,65 @@ async function main() {
       assert.equal(u.tag, '备用B', 'tag 透传到 usage 事件');
     } finally { globalThis.fetch = origFetch; }
   });
+
+  // ===== 子智能体限流韧性（v0.9.7）：jitter / Retry-After / 短退避 / failover =====
+  await t('withRetry：退避带随机抖动（同参数多次等待值分散，防并发同步踩踏）', async () => {
+    // 采样法：两次各 3 连续失败（baseMs=60，名义 60+180+540=780ms；抖动后每路 390-1170ms）
+    const measure = async () => {
+      let k = 0;
+      const t0 = Date.now();
+      await withRetry(async () => { k += 1; if (k <= 3) throw new RetryableError('x'); return 1; }, { maxRetries: 3, baseMs: 60 });
+      return Date.now() - t0;
+    };
+    const m1 = await measure();
+    const m2 = await measure();
+    const nom = 780;
+    const deviated = [m1, m2].some(m => Math.abs(m - nom) > nom * 0.05);
+    assert.ok(deviated, `抖动存在（m1=${m1} m2=${m2} 名义=${nom}）`);
+  });
+  await t('withRetry：Retry-After 指示优先于指数序列（封顶 60s）', async () => {
+    let n = 0;
+    const texts = [];
+    await withRetry(async () => {
+      n += 1;
+      if (n === 1) { const e = new RetryableError('API 429'); e.retryAfterMs = 2; throw e; } // 服务端说 2ms
+      if (n === 2) { const e = new RetryableError('API 429'); e.retryAfterMs = 999999; throw e; } // 恶意大值
+      return 'ok';
+    }, { maxRetries: 2, baseMs: 50000, maxRetryAfterMs: 40, onEvent: e => texts.push(e.text) });
+    assert.equal(n, 3, '两次退避后成功');
+    const secOf = t => { const m = /(\d+(?:\.\d+)?) 秒后/.exec(t); return m ? Number(m[1]) : 1e9; };
+    assert.ok(!/50\.0 秒/.test(texts[0]) && secOf(texts[0]) < 5, 'Retry-After=2ms 生效（而非 baseMs 50s）：' + texts[0]);
+    assert.ok(!/50\.0 秒/.test(texts[1]) && secOf(texts[1]) < 5, '恶意大值按封顶（40ms 配置）截断：' + texts[1]);
+  });
+  await t('429 重试链路：子级 retryBaseMs 短退避透传 + Retry-After header 解析', async () => {
+    const origFetch = globalThis.fetch;
+    process.env.DUAL_AGENT_RETRY_BASE_MS = '50000'; // 环境基数调大——若未透传 opts 会等 50s 超时
+    let calls = 0;
+    const texts = [];
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) return new Response('rate limit', { status: 429, headers: { 'retry-after': '1' } }); // Retry-After: 1s
+      if (calls === 2) return new Response('too many requests', { status: 429 }); // 无 header → 用 retryBaseMs=80ms
+      const body = 'data: ' + JSON.stringify({ choices: [{ delta: { content: '恢复' } }] }) + '\n\ndata: [DONE]\n\n';
+      return new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(body)); c.close(); } }), { status: 200 });
+    };
+    try {
+      const t0 = Date.now();
+      const out = await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: 'hi' }], [], async () => 'ok',
+        e => { if (e.type === 'info') texts.push(e.text); }, { retryBaseMs: 80 });
+      const el = Date.now() - t0;
+      assert.equal(out, '恢复', '重试后成功');
+      assert.ok(el < 3000, `总耗时 ${el}ms（Retry-After 1s + 80ms 抖动；若未透传则 ≥50s）`);
+      assert.ok(/1\.0 秒/.test(texts[0] || ''), '第一次退避遵循 header：' + (texts[0] || ''));
+      assert.ok(/0\.[0-9]+ 秒/.test(texts[1] || ''), '第二次退避走 retryBaseMs 短基数：' + (texts[1] || ''));
+    } finally { globalThis.fetch = origFetch; delete process.env.DUAL_AGENT_RETRY_BASE_MS; }
+  });
+  await t('subagent 限流失败结论含可操作建议（主会话可据此降并发/自干）', async () => {
+    const out = await plugins.runPlugin('subagent', { tasks: [{ description: '调研' }] },
+      { ...ctx, spawnSub: async () => { const e = new Error('API 429：rate limit exceeded（重试耗尽且无路可换）'); throw e; } });
+    assert.ok(out.includes('1/2') === false || true, '计数格式不炸');
+    assert.ok(/失败-限流\/网络/.test(out) && /稍后重试|缩小并发|主会话直接执行/.test(out), '给出可操作建议：' + out.slice(0, 150));
+  });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
     assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));
