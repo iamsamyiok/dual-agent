@@ -696,8 +696,7 @@ async function main() {
       assert.equal(calls, 3, '恰好 3 轮（maxRounds 生效）');
     } finally { globalThis.fetch = origFetch; }
   });
-  await t('subagent 插件：并行派生 + 结论汇总 + 无 spawnSub 拒绝', async () => {
-    // mock 场景 1：ctx 无 spawnSub → 拒绝
+  await t('subagent 插件：并行派生 + 结论汇总 + 无 spawnSub 拒绝', async () => {    // mock 场景 1：ctx 无 spawnSub → 拒绝
     const noSub = await plugins.runPlugin('subagent', { tasks: [{ description: 'x' }] }, ctx);
     assert.ok(/禁止派生|仅主会话/.test(noSub), noSub);
     // mock 场景 2：spawnSub 并行执行返回结论
@@ -713,6 +712,50 @@ async function main() {
       tasks: [{ description: '好的' }, { description: '坏的' }]
     }, { ...ctx, spawnSub: async (desc) => { if (desc === '坏的') throw new Error('子任务超时'); return '结论'; } });
     assert.ok(partial.includes('1/2') && partial.includes('[失败]'), partial.slice(0, 120));
+  });
+
+  // ===== 多路 LLM API profile（v0.9.6）：子智能体轮转分摊速率限制 =====
+  const { validProfiles, pickProfile } = require(path.join(ROOT, 'lib', 'profiles'));
+  await t('validProfiles：无效条目过滤（缺字段/非对象/非数组）', () => {
+    assert.deepEqual(validProfiles({}), [], '无字段');
+    assert.deepEqual(validProfiles({ inner_profiles: 'oops' }), [], '非数组');
+    assert.deepEqual(validProfiles({ inner_profiles: [null, 42, 'x'] }), [], '非对象条目');
+    assert.deepEqual(validProfiles({ inner_profiles: [
+      { base_url: 'https://a/v1', api_key: 'k1', model: 'm1' },
+      { base_url: 'https://b/v1', api_key: '', model: 'm2' },
+      { base_url: '', api_key: 'k3', model: 'm3' },
+      { base_url: 'https://d/v1', api_key: 'k4' }
+    ]}).map(p => p.name), ['profile-1'], '缺 api_key/model/base_url 的条目全部剔除');
+    assert.equal(validProfiles({ inner_profiles: [{ name: '备用A', base_url: 'https://a/v1', api_key: 'k1', model: 'm1' }] })[0].name, '备用A', '具名条目保留名称');
+  });
+  await t('pickProfile：轮转选择均匀分摊，无 profiles 回退主配置', () => {
+    const cfg = { inner: { base_url: 'https://main/v1', api_key: 'mk', model: 'mm' }, inner_profiles: [
+      { name: 'A', base_url: 'https://a/v1', api_key: 'ka', model: 'ma' },
+      { name: 'B', base_url: 'https://b/v1', api_key: 'kb', model: 'mb' },
+      { name: 'C', base_url: 'https://c/v1', api_key: 'kc', model: 'mc' }
+    ]};
+    const rr = { n: 0 };
+    const got = [0, 1, 2, 3, 4].map(() => pickProfile(cfg, rr).name);
+    assert.deepEqual(got, ['A', 'B', 'C', 'A', 'B'], '轮转序列均匀覆盖：' + got.join(','));
+    const p1 = pickProfile(cfg, rr); // rr.n 已到 5：5%3=2 → 第三路
+    assert.equal(p1.cfg.base_url, 'https://c/v1', '选中的 cfg 形状与 cfg.inner 一致');
+    assert.equal(p1.rotated, true, '标记轮转');
+    const fb = pickProfile({ inner: cfg.inner }, { n: 5 });
+    assert.equal(fb.name, 'main', '无 profiles 回退 main');
+    assert.equal(fb.cfg.base_url, 'https://main/v1', '回退用主配置');
+    assert.equal(fb.rotated, false, '标记未轮转');
+  });
+  await t('usage 事件透传 opts.tag（profile 名随计量落盘）', async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => sseResponse([JSON.stringify({ choices: [{ delta: { content: 'ok' } }] }), '[DONE]']);
+    try {
+      const events = [];
+      await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: 'hi' }], [], async () => 'ok',
+        e => events.push(e), { tag: '备用B' });
+      const u = events.find(e => e.type === 'usage');
+      assert.ok(u, '有 usage 事件');
+      assert.equal(u.tag, '备用B', 'tag 透传到 usage 事件');
+    } finally { globalThis.fetch = origFetch; }
   });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));

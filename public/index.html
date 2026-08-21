@@ -286,6 +286,9 @@
       <input id="cfgKey" type="password" placeholder="sk-...">
       <label>模型名（如 Qwen/Qwen3-8B）</label>
       <input id="cfgModel" placeholder="provider/model">
+      <label style="margin-top:10px">多路 API（可选）：子智能体并行时轮转分摊，防单端点速率限制</label>
+      <div id="cfgProfiles"></div>
+      <button class="mini-btn" style="margin-top:4px" onclick="addProfileRow()">+ 添加一路</button>
     </div>
     <div class="m-foot">
       <button class="btn-no" onclick="closeConfig()">取消</button>
@@ -365,7 +368,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.9.5';
+const PAGE_VERSION = '0.9.6';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -981,17 +984,36 @@ async function doRollback() {
 }
 
 // ==================== 配置 ====================
+function profileRow(p = { name: '', base_url: '', api_key: '', model: '' }) {
+  const div = document.createElement('div');
+  div.className = 'profile-row';
+  div.style.cssText = 'display:grid;grid-template-columns:70px 1fr 1fr 1fr 26px;gap:4px;margin:4px 0';
+  div.innerHTML = `<input placeholder="名称" value="${esc(p.name)}" data-k="name">
+    <input placeholder="base_url" value="${esc(p.base_url)}" data-k="base_url">
+    <input placeholder="api_key" type="password" value="${esc(p.api_key)}" data-k="api_key">
+    <input placeholder="model" value="${esc(p.model)}" data-k="model">
+    <button class="mini-btn" onclick="this.parentElement.remove()" title="删除此路">×</button>`;
+  return div;
+}
+function addProfileRow(p) { $('cfgProfiles').appendChild(profileRow(p)); }
 function openConfig() {
   api('/api/config').then(d => {
     $('cfgBase').value = d.config.inner.base_url || '';
     $('cfgKey').value = d.config.inner.api_key || '';
     $('cfgModel').value = d.config.inner.model || '';
+    $('cfgProfiles').innerHTML = '';
+    (d.config.inner_profiles || []).forEach(p => addProfileRow(p));
     $('configMask').classList.add('show');
   });
 }
 function closeConfig() { $('configMask').classList.remove('show'); }
 async function saveConfigUi() {
-  const d = await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inner: { base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() } }) });
+  const profiles = [...$('cfgProfiles').querySelectorAll('.profile-row')].map(r => {
+    const o = {};
+    r.querySelectorAll('input[data-k]').forEach(i => { o[i.dataset.k] = i.value.trim(); });
+    return o;
+  }).filter(o => o.base_url && o.model); // 名称/key 可省（key 缺失则此路无效，后端同样校验）
+  const d = await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inner: { base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() }, inner_profiles: profiles }) });
   if (d.success) { closeConfig(); toast('配置已保存'); loadHealth(); }
 }
 

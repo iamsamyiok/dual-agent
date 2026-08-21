@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.5';
+const APP_VERSION = '0.9.6';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -21,6 +21,7 @@ const plugins = require('./lib/plugins');
 const approval = require('./lib/approval');
 const outerMod = require('./lib/outer');
 const { chatInner, isMultiStepTask } = require('./lib/inner');
+const { validProfiles, pickProfile } = require('./lib/profiles');
 
 // ---------- 日志 tee ----------
 const LOG_PATH = path.join(DATA_DIR, 'server.log');
@@ -31,7 +32,7 @@ process.on('uncaughtException', e => console.log('[uncaught]', e && e.stack || e
 process.on('unhandledRejection', e => console.log('[unhandled]', e && (e.stack || e) || e));
 
 // ---------- 配置（内层 OpenAI 兼容 API；key 仅存本机） ----------
-const DEFAULT_CONFIG = { inner: { base_url: '', api_key: '', model: '' }, workspace: 'default', outerSession: '', reviewMark: 0 };
+const DEFAULT_CONFIG = { inner: { base_url: '', api_key: '', model: '' }, inner_profiles: [], workspace: 'default', outerSession: '', reviewMark: 0 };
 function getConfig() {
   try { return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) }; } catch { return { ...DEFAULT_CONFIG }; }
 }
@@ -40,6 +41,15 @@ function saveConfig(patch) {
   const next = { ...cfg, inner: { ...cfg.inner, ...(patch.inner || {}) } };
   // 前端回传打码值时保留原 key
   if (patch.inner && /ˣ{4}/.test(patch.inner.api_key || '')) next.inner.api_key = cfg.inner.api_key;
+  // 多路 API profile：数组整体替换；条目内打码值保留原 key（前端未改动即回传打码串）
+  if (Array.isArray(patch.inner_profiles)) {
+    const prev = validProfiles(cfg);
+    next.inner_profiles = patch.inner_profiles.map((p, i) => {
+      if (!p || typeof p !== 'object') return p;
+      const old = prev[i];
+      return /ˣ{4}/.test(String(p.api_key || '')) && old ? { ...p, api_key: old.api_key } : p;
+    });
+  }
   for (const k of ['workspace', 'outerSession', 'reviewMark']) {
     if (k in patch) next[k] = patch[k];
   }
@@ -56,7 +66,9 @@ function saveConfig(patch) {
 function maskedConfig() {
   const cfg = getConfig();
   const k = cfg.inner.api_key || '';
-  return { ...cfg, inner: { ...cfg.inner, api_key: k ? k.slice(0, 3) + 'ˣˣˣˣ' : '' } };
+  const maskKey = key => (key ? String(key).slice(0, 3) + 'ˣˣˣˣ' : '');
+  const profiles = validProfiles(cfg).map(p => ({ ...p, api_key: maskKey(p.api_key) }));
+  return { ...cfg, inner: { ...cfg.inner, api_key: maskKey(k) }, inner_profiles: profiles };
 }
 
 // ---------- 多工作区（内层插件默认工作目录，记忆/技能随工作区隔离） ----------
@@ -317,6 +329,7 @@ const server = http.createServer(async (req, res) => {
         success: true, version: APP_VERSION,
         mock: process.env.DUAL_AGENT_MOCK === '1',
         innerConfigured: !!(cfg.inner.base_url && cfg.inner.api_key && cfg.inner.model),
+        profileCount: validProfiles(cfg).length, // 多路 API：子智能体轮转分摊速率限制（0 = 仅主配置）
         opencode: oc ? oc.cmd : '', workspace: currentWorkspace(),
         workspaceDir: workspaceDir(), outerSession: cfg.outerSession || ''
       });
@@ -445,11 +458,11 @@ const server = http.createServer(async (req, res) => {
             let rows = [];
             try { rows = JSON.parse(fs.readFileSync(uf, 'utf8')); } catch { /* 首次 */ }
             if (!Array.isArray(rows)) rows = [];
-            rows.push({ ts: Date.now(), prompt: ev.last.prompt, completion: ev.last.completion, cached: ev.last.cached, est: !!ev.est, sub: !!ev.sub,
+            rows.push({ ts: Date.now(), prompt: ev.last.prompt, completion: ev.last.completion, cached: ev.last.cached, est: !!ev.est, sub: !!ev.sub, profile: ev.tag || 'main',
               totalsPrompt: ev.totals.prompt, totalsCompletion: ev.totals.completion, totalsCalls: ev.totals.calls });
             fs.writeFileSync(uf, JSON.stringify(rows, null, 1), 'utf8');
           } catch { /* 计量落盘失败不阻断会话 */ }
-          appendProcess(`\n> 📊 token${ev.sub ? '（子智能体）' : ''}（第 ${ev.totals.calls} 次调用${ev.est ? '，估算' : '，API 真实返回'}）：prompt ${ev.last.prompt} + 输出 ${ev.last.completion}；会话累计 prompt ${ev.totals.prompt} + 输出 ${ev.totals.completion}\n`);
+            appendProcess(`\n> 📊 token${ev.sub ? `（子智能体${ev.tag ? '@' + ev.tag : ''}）` : ''}（第 ${ev.totals.calls} 次调用${ev.est ? '，估算' : '，API 真实返回'}）：prompt ${ev.last.prompt} + 输出 ${ev.last.completion}；会话累计 prompt ${ev.totals.prompt} + 输出 ${ev.totals.completion}\n`);
         } else if (ev.type === 'error') {
           flushText();
           appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);
@@ -457,14 +470,18 @@ const server = http.createServer(async (req, res) => {
         send(ev);
       };
       // 子智能体派生（对标 Claude Code Task）：独立 messages 跑完整工具循环（8 轮上限），
-      // 探索过程隔离在子上下文，主上下文只收结论。子级 ctx 不带 spawnSub → 无法再派生（深度 1）
+      // 探索过程隔离在子上下文，主上下文只收结论。子级 ctx 不带 spawnSub → 无法再派生（深度 1）。
+      // 多路 API（v0.9.6）：子任务轮转选择 inner_profiles 里的配置，并行请求分摊到不同端点，
+      // 避免同一 LLM API 的并发速率限制；未配置 profiles 时回退主配置（行为与旧版一致）
       const SUB_MAX_ROUNDS = 8;
+      const SUB_RR = { n: 0 }; // 轮转计数器：跨子任务递增，均匀分摊
       const SUB_SYSTEM_PROMPT = [
         '你是子智能体，负责独立完成一个调研/探索型子任务并返回结论。',
         '规则：1) 直接执行，不要建 todo 清单；2) 结论必须自包含（数字/路径/关键原文），主会话看不到你的中间过程；',
         '3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件；4) 结论 ≤300 字，先给结果再给一句依据。'
       ].join('\n');
       const spawnSub = async (description) => {
+        const picked = pickProfile(cfg, SUB_RR); // 轮转选路：profile 名随 usage 事件落盘（tag）
         const subMessages = [
           { role: 'system', content: SUB_SYSTEM_PROMPT },
           { role: 'user', content: String(description) }
@@ -472,12 +489,12 @@ const server = http.createServer(async (req, res) => {
         const subCallPlugin = async (name, args) => {
           const t0 = Date.now();
           const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR }); // 无 spawnSub：子级禁止嵌套
-          appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0, sub: true });
+          appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0, sub: true, profile: picked.name });
           return result;
         };
         const { chatInnerReal } = require('./lib/inner');
-        return await chatInnerReal(cfg.inner, subMessages, plugins.toolDefs(), subCallPlugin,
-          ev => handleEvent({ ...ev, sub: true }), { maxRounds: SUB_MAX_ROUNDS });
+        return await chatInnerReal(picked.cfg, subMessages, plugins.toolDefs(), subCallPlugin,
+          ev => handleEvent({ ...ev, sub: true, tag: ev.type === 'usage' ? picked.name : ev.tag }), { maxRounds: SUB_MAX_ROUNDS, tag: picked.name });
       };
       const callPlugin = async (name, args) => {
         const t0 = Date.now();
