@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.4';
+const APP_VERSION = '0.9.5';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -208,6 +208,8 @@ const INNER_SYSTEM_PROMPT = [
   '2. 调用 skill.list() 查看技能库（渐进式：list 只给名称+描述），发现与任务相关的技能必须 skill.get(name) 读全文并按其步骤执行',
   '3. 复杂任务必须先建任务清单：满足任一条件即算复杂——(a) 需要 ≥3 个执行步骤 (b) 涉及多个文件的创建/修改 (c) 用户消息含"然后/接着/再/最后"等多步标志。建法：每个步骤一次 todo.add(text="动宾短语")；此后每完成一步立即 todo.toggle(id=...) 勾选，开始下一步前如记不清进度就 todo.list() 查看；全部完成时清单应全为 [x]。禁止跳过建清单直接执行复杂任务',
   '4. 产出验证纪律：任务产出文件后，禁止只凭"我写了"就宣称完成。收尾前用 verify 插件断言关键产出（exists + contains 文本特征 + line_count 行数），多规则一次调用；看到 FAIL 必须修复后重新 verify，直到 PASS 才能总结',
+  '5. 子智能体（subagent）：探索型子任务（多文件调研、方案对比、联网查证 ≥2 个独立问题）用 subagent 插件并行派生，主上下文只收结论——禁止自己 read 一堆大文件把上下文撑爆。产出写入类操作仍由主会话亲自执行',
+  '6. 动态规划：每轮可见 [任务清单] 注记。执行中发现实际状况与计划不符（文件比预期大/依赖缺失/步骤顺序要变）必须先修订清单（todo.add 新步骤）再继续，禁止明知跑偏还硬走原计划',
   '',
   '## 技能执行纪律（重要）：',
   '- 技能全文就是操作手册：其中要求的每个步骤（读模板、跑脚本、按格式输出）都必须照做',
@@ -423,45 +425,85 @@ const server = http.createServer(async (req, res) => {
       }
       innerMessages.push({ role: 'user', content: finalMsg });
       persistInnerMessages();
+      // 事件处理器（主/子智能体共用）：过程落盘 + usage 落账 + SSE 透传（子事件带 sub 标记）
+      const handleEvent = (ev) => {
+        if (ev.type === 'text' && !ev.sub) pendingText = ev.text;
+        else if (ev.type === 'tool_call') {
+          flushText();
+          let pretty = '';
+          try { pretty = JSON.stringify(ev.args, null, 2); } catch { pretty = String(ev.args); }
+          appendProcess(`\n### ${fmtClock(Date.now())} 🔧 ${ev.sub ? '[子] ' : ''}${ev.plugin}\n\n**入参**\n\n\`\`\`json\n${pretty}\n\`\`\`\n`);
+        } else if (ev.type === 'tool_result') {
+          appendProcess(`**结果** ${ev.ok ? '✓' : '✗'}（${ev.ms}ms）${ev.sub ? ' [子智能体]' : ''}\n\n\`\`\`\n${String(ev.result).slice(0, 2000)}\n\`\`\`\n`);
+        } else if (ev.type === 'info') {
+          flushText();
+          appendProcess(`\n### ${fmtClock(Date.now())} ⏳ ${String(ev.text || '')}\n`);
+        } else if (ev.type === 'usage') {
+          // token 计量落盘：逐轮追加（当轮量 + 会话累计），usage 插件与审计由此取数；子智能体标记 sub
+          try {
+            const uf = path.join(WS_DIR, 'inner-usage.json');
+            let rows = [];
+            try { rows = JSON.parse(fs.readFileSync(uf, 'utf8')); } catch { /* 首次 */ }
+            if (!Array.isArray(rows)) rows = [];
+            rows.push({ ts: Date.now(), prompt: ev.last.prompt, completion: ev.last.completion, cached: ev.last.cached, est: !!ev.est, sub: !!ev.sub,
+              totalsPrompt: ev.totals.prompt, totalsCompletion: ev.totals.completion, totalsCalls: ev.totals.calls });
+            fs.writeFileSync(uf, JSON.stringify(rows, null, 1), 'utf8');
+          } catch { /* 计量落盘失败不阻断会话 */ }
+          appendProcess(`\n> 📊 token${ev.sub ? '（子智能体）' : ''}（第 ${ev.totals.calls} 次调用${ev.est ? '，估算' : '，API 真实返回'}）：prompt ${ev.last.prompt} + 输出 ${ev.last.completion}；会话累计 prompt ${ev.totals.prompt} + 输出 ${ev.totals.completion}\n`);
+        } else if (ev.type === 'error') {
+          flushText();
+          appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);
+        }
+        send(ev);
+      };
+      // 子智能体派生（对标 Claude Code Task）：独立 messages 跑完整工具循环（8 轮上限），
+      // 探索过程隔离在子上下文，主上下文只收结论。子级 ctx 不带 spawnSub → 无法再派生（深度 1）
+      const SUB_MAX_ROUNDS = 8;
+      const SUB_SYSTEM_PROMPT = [
+        '你是子智能体，负责独立完成一个调研/探索型子任务并返回结论。',
+        '规则：1) 直接执行，不要建 todo 清单；2) 结论必须自包含（数字/路径/关键原文），主会话看不到你的中间过程；',
+        '3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件；4) 结论 ≤300 字，先给结果再给一句依据。'
+      ].join('\n');
+      const spawnSub = async (description) => {
+        const subMessages = [
+          { role: 'system', content: SUB_SYSTEM_PROMPT },
+          { role: 'user', content: String(description) }
+        ];
+        const subCallPlugin = async (name, args) => {
+          const t0 = Date.now();
+          const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR }); // 无 spawnSub：子级禁止嵌套
+          appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0, sub: true });
+          return result;
+        };
+        const { chatInnerReal } = require('./lib/inner');
+        return await chatInnerReal(cfg.inner, subMessages, plugins.toolDefs(), subCallPlugin,
+          ev => handleEvent({ ...ev, sub: true }), { maxRounds: SUB_MAX_ROUNDS });
+      };
       const callPlugin = async (name, args) => {
         const t0 = Date.now();
-        const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR });
+        const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR, spawnSub });
         // 一次追加完整条目（含耗时），替代旧的“占位+回读覆写”两段式
         appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0 });
         return result;
       };
+      // 动态清单注记：每轮 API 调用前取最新 todo 状态注入发送副本（落盘干净）——
+      // 对标 Claude Code TodoList 的「执行中可见」，模型无需 todo.list 也能对齐进度、发现偏差即修订
+      const todoNote = () => {
+        try {
+          const arr = JSON.parse(fs.readFileSync(path.join(WS_DIR, '.todo.json'), 'utf8'));
+          if (!Array.isArray(arr) || !arr.length) return '';
+          const open = arr.filter(t => !t.done);
+          const done = arr.filter(t => t.done);
+          const lines = ['[任务清单] 当前进度（执行中发现计划不适用必须修订：todo.add 加步骤/调整后再继续）：'];
+          for (const t of open) lines.push(`- [ ] #${t.id} ${t.text}`);
+          const recentDone = done.slice(-3);
+          for (const t of recentDone) lines.push(`- [x] #${t.id} ${t.text}`);
+          if (done.length > recentDone.length) lines.push(`- （另有 ${done.length - recentDone.length} 项已完成略）`);
+          return lines.join('\n');
+        } catch { return ''; }
+      };
       try {
-        await chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPlugin, ev => {
-          // 过程落盘（完整入参与全量结果；与聊天窗口的单行摘要互补）
-          if (ev.type === 'text') pendingText = ev.text;
-          else if (ev.type === 'tool_call') {
-            flushText();
-            let pretty = '';
-            try { pretty = JSON.stringify(ev.args, null, 2); } catch { pretty = String(ev.args); }
-            appendProcess(`\n### ${fmtClock(Date.now())} 🔧 ${ev.plugin}\n\n**入参**\n\n\`\`\`json\n${pretty}\n\`\`\`\n`);
-          } else if (ev.type === 'tool_result') {
-            appendProcess(`**结果** ${ev.ok ? '✓' : '✗'}（${ev.ms}ms）\n\n\`\`\`\n${String(ev.result)}\n\`\`\`\n`);
-          } else if (ev.type === 'info') {
-            flushText();
-            appendProcess(`\n### ${fmtClock(Date.now())} ⏳ ${String(ev.text || '')}\n`);
-          } else if (ev.type === 'usage') {
-            // token 计量落盘：逐轮追加（当轮量 + 会话累计），usage 插件与审计由此取数
-            try {
-              const uf = path.join(WS_DIR, 'inner-usage.json');
-              let rows = [];
-              try { rows = JSON.parse(fs.readFileSync(uf, 'utf8')); } catch { /* 首次 */ }
-              if (!Array.isArray(rows)) rows = [];
-              rows.push({ ts: Date.now(), prompt: ev.last.prompt, completion: ev.last.completion, cached: ev.last.cached, est: !!ev.est,
-                totalsPrompt: ev.totals.prompt, totalsCompletion: ev.totals.completion, totalsCalls: ev.totals.calls });
-              fs.writeFileSync(uf, JSON.stringify(rows, null, 1), 'utf8');
-            } catch { /* 计量落盘失败不阻断会话 */ }
-            appendProcess(`\n> 📊 token（第 ${ev.totals.calls} 次调用${ev.est ? '，估算' : '，API 真实返回'}）：prompt ${ev.last.prompt} + 输出 ${ev.last.completion}；会话累计 prompt ${ev.totals.prompt} + 输出 ${ev.totals.completion}\n`);
-          } else if (ev.type === 'error') {
-            flushText();
-            appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);
-          }
-          send(ev);
-        });
+        await chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPlugin, handleEvent, { todoNote });
         flushText();
         persistInnerMessages();
         send({ type: 'done' });

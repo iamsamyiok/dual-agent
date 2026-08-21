@@ -1,0 +1,55 @@
+// @name subagent
+// @desc 子智能体并行调研：派生独立上下文的子任务（读文件/搜索/联网查证），只回结论——保护主上下文不膨胀
+// @essential false
+// 机制（对标 Claude Code Task 工具）：子任务在独立 messages 里跑完整工具循环（8 轮上限），
+// 探索过程的 token 消耗与中间结果全部隔离在子上下文，主上下文只收到压缩后的结论。
+// 主上下文因此可以承载更多有效轮次，长任务的「上下文膨胀 → 预算折叠 → 信息丢失」链条被切断。
+// 子级禁止再派生（深度 1，防递归爆炸）；tasks 数组内部 Promise.all 并行执行。
+
+module.exports = {
+  params: {
+    type: 'object',
+    properties: {
+      tasks: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 4,
+        description: '子任务列表（1-4 个，相互独立可并行）。每个子任务必须自带完整上下文：目标、涉及文件路径、输出要求',
+        items: {
+          type: 'object',
+          properties: {
+            description: { type: 'string', description: '子任务完整指令（自包含：目标+路径+输出格式）' }
+          },
+          required: ['description']
+        }
+      }
+    },
+    required: ['tasks']
+  },
+
+  run: async (args, ctx) => {
+    if (typeof ctx.spawnSub !== 'function') {
+      throw new Error('当前环境禁止派生子智能体（子级不可嵌套派生；此插件仅主会话可用）');
+    }
+    const tasks = (Array.isArray(args.tasks) ? args.tasks : [])
+      .filter(t => t && String(t.description || '').trim())
+      .slice(0, 4);
+    if (!tasks.length) throw new Error('tasks 为空（每个子任务需要 description）');
+
+    const t0 = Date.now();
+    const settled = await Promise.allSettled(tasks.map(t => ctx.spawnSub(String(t.description))));
+    const lines = [];
+    let okCount = 0;
+    settled.forEach((r, i) => {
+      const head = `## 子任务 ${i + 1}：${String(tasks[i].description).slice(0, 60)}`;
+      if (r.status === 'fulfilled' && r.value && !/^插件.*(加载失败|执行出错)/.test(String(r.value))) {
+        okCount += 1;
+        lines.push(`${head}\n${String(r.value).slice(0, 1200)}`);
+      } else {
+        const err = r.status === 'rejected' ? String(r.reason && r.reason.message || r.reason) : String(r.value).slice(0, 200);
+        lines.push(`${head}\n[失败] ${err}`);
+      }
+    });
+    return `子智能体完成 ${okCount}/${tasks.length}（并行 ${tasks.length} 路，总耗时 ${Math.round((Date.now() - t0) / 1000)}s，结论已压缩，探索细节不占主上下文）：\n\n${lines.join('\n\n')}`;
+  }
+};

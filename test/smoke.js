@@ -339,7 +339,7 @@ async function main() {
     } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg, isMultiStepTask } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg, isMultiStepTask, READONLY_PLUGINS } = require(path.join(ROOT, 'lib', 'inner'));
   const { preflight, pluginScores } = require(path.join(ROOT, 'lib', 'regression'));
   await t('regression 预检：坏结构插件被拦截（params/run 缺失、第三方模块、语法错）', async () => {
     const bad = await preflight([{ action: 'create', plugin: 't-bad', code: 'module.exports = { run: "x" };' }]);
@@ -607,6 +607,112 @@ async function main() {
       assert.equal(us[1].totals.prompt, 1200, '500+700 跨轮累加');
       assert.equal(us[1].totals.completion, 15, '10+5 跨轮累加');
     } finally { globalThis.fetch = origFetch; }
+  });
+
+  // ===== 只读并行 + 动态清单注记 + 子智能体轮数上限（v0.9.5）=====
+  await t('只读并行：一轮 2 个 read 并发执行（耗时=max 而非 sum）', async () => {
+    const origFetch = globalThis.fetch;
+    let round = 0;
+    globalThis.fetch = async () => {
+      round += 1;
+      if (round === 1) return sseResponse([
+        // 一轮发 2 个只读 tool_calls
+        JSON.stringify({ choices: [{ delta: { tool_calls: [
+          { index: 0, id: 'p1', function: { name: 'read', arguments: '{"path":"a.txt"}' } },
+          { index: 1, id: 'p2', function: { name: 'read', arguments: '{"path":"b.txt"}' } }
+        ] } }] }),
+        '[DONE]'
+      ]);
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: '完成' } }] }), '[DONE]']);
+    };
+    try {
+      const ran = [];
+      const t0 = Date.now();
+      await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: '读两个' }], [],
+        async (name, args) => { ran.push(args.path); await new Promise(r => setTimeout(r, 120)); return `content of ${args.path}`; },
+        () => {});
+      const el = Date.now() - t0;
+      assert.deepEqual(ran.sort(), ['a.txt', 'b.txt'], '两个调用都执行');
+      assert.ok(el < 200, `并行应 ≈120ms（实际 ${el}ms；串行会 ≥240ms）`);
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('写类操作保持串行（同轮 write + read 不并行）', async () => {
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => sseResponse([
+      JSON.stringify({ choices: [{ delta: { tool_calls: [
+        { index: 0, id: 'w1', function: { name: 'write', arguments: '{"path":"x.txt","content":"1"}' } },
+        { index: 1, id: 'r1', function: { name: 'read', arguments: '{"path":"x.txt"}' } }
+      ] } }] }),
+      '[DONE]'
+    ]);
+    try {
+      const order = [];
+      await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: '写读' }], [],
+        async (name, args) => { order.push(name + ':start'); await new Promise(r => setTimeout(r, 30)); order.push(name + ':end'); return 'ok'; },
+        () => {});
+      assert.ok(order.indexOf('write:end') < order.indexOf('read:start'), 'read 必须等 write 完成：' + order.join(','));
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('todoNote 注记：每轮注入最新清单（第二轮可见未完成项）', async () => {
+    const origFetch = globalThis.fetch;
+    const bodies = [];
+    let todoState = [{ id: 1, text: '第一步', done: true }, { id: 2, text: '第二步', done: false }];
+    globalThis.fetch = async (u, init) => {
+      bodies.push(JSON.parse(init.body));
+      if (bodies.length === 1) return sseResponse([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 't1', function: { name: 'todo', arguments: '{"action":"toggle","id":2}' } }] } }] }),
+        '[DONE]'
+      ]);
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: '完成' } }] }), '[DONE]']);
+    };
+    try {
+      const messages = [{ role: 'user', content: '干活' }];
+      await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, messages, [],
+        async () => 'ok',
+        () => {},
+        { todoNote: () => {
+          const open = todoState.filter(t => !t.done);
+          return open.length ? `[任务清单]\n- [ ] #2 第二步` : '';
+        } });
+      // toggle 后的第二轮发送副本应含清单（第一轮 usage=0 无注记）
+      assert.ok(bodies.length === 2, '两轮调用');
+      assert.ok(String(bodies[1].messages.at(-1).content).includes('[任务清单]'), '第二轮发送副本注入清单注记');
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('子级轮数上限：opts.maxRounds 生效（防子智能体失控）', async () => {
+    const origFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'l' + calls, function: { name: 'read', arguments: '{"path":"f"}' } }] } }] }),
+        '[DONE]'
+      ]);
+    };
+    try {
+      const out = await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, [{ role: 'user', content: '无限读' }], [],
+        async () => 'ok', () => {}, { maxRounds: 3 });
+      assert.ok(/轮数上限/.test(out), '达到上限强制结束');
+      assert.equal(calls, 3, '恰好 3 轮（maxRounds 生效）');
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('subagent 插件：并行派生 + 结论汇总 + 无 spawnSub 拒绝', async () => {
+    // mock 场景 1：ctx 无 spawnSub → 拒绝
+    const noSub = await plugins.runPlugin('subagent', { tasks: [{ description: 'x' }] }, ctx);
+    assert.ok(/禁止派生|仅主会话/.test(noSub), noSub);
+    // mock 场景 2：spawnSub 并行执行返回结论
+    const spawnLog = [];
+    const summary = await plugins.runPlugin('subagent', {
+      tasks: [{ description: '调研 A' }, { description: '调研 B' }]
+    }, { ...ctx, spawnSub: async (desc) => { spawnLog.push(desc); return `${desc} 的结论：一切正常`; } });
+    assert.equal(spawnLog.length, 2, '两个子任务都派生');
+    assert.ok(summary.includes('2/2'), '两个都成功：' + summary.slice(0, 80));
+    assert.ok(summary.includes('调研 A 的结论') && summary.includes('调研 B 的结论'), '结论都汇总');
+    // mock 场景 3：子任务失败不炸整体
+    const partial = await plugins.runPlugin('subagent', {
+      tasks: [{ description: '好的' }, { description: '坏的' }]
+    }, { ...ctx, spawnSub: async (desc) => { if (desc === '坏的') throw new Error('子任务超时'); return '结论'; } });
+    assert.ok(partial.includes('1/2') && partial.includes('[失败]'), partial.slice(0, 120));
   });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
