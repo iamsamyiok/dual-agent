@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.2';
+const APP_VERSION = '0.9.3';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -20,7 +20,7 @@ fs.mkdirSync(WS_ROOT, { recursive: true });
 const plugins = require('./lib/plugins');
 const approval = require('./lib/approval');
 const outerMod = require('./lib/outer');
-const { chatInner } = require('./lib/inner');
+const { chatInner, isMultiStepTask } = require('./lib/inner');
 
 // ---------- 日志 tee ----------
 const LOG_PATH = path.join(DATA_DIR, 'server.log');
@@ -206,6 +206,7 @@ const INNER_SYSTEM_PROMPT = [
   '## 任务执行前必须：',
   '1. 先调用 memory.search(query="任务关键词") 检索相关记忆，将结果作为背景参考',
   '2. 调用 skill.list() 查看技能库（渐进式：list 只给名称+描述），发现与任务相关的技能必须 skill.get(name) 读全文并按其步骤执行',
+  '3. 复杂任务必须先建任务清单：满足任一条件即算复杂——(a) 需要 ≥3 个执行步骤 (b) 涉及多个文件的创建/修改 (c) 用户消息含"然后/接着/再/最后"等多步标志。建法：每个步骤一次 todo.add(text="动宾短语")；此后每完成一步立即 todo.toggle(id=...) 勾选，开始下一步前如记不清进度就 todo.list() 查看；全部完成时清单应全为 [x]。禁止跳过建清单直接执行复杂任务',
   '',
   '## 技能执行纪律（重要）：',
   '- 技能全文就是操作手册：其中要求的每个步骤（读模板、跑脚本、按格式输出）都必须照做',
@@ -412,7 +413,14 @@ const server = http.createServer(async (req, res) => {
       // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）
       if (innerMessages[0] && innerMessages[0].role === 'system') innerMessages[0].content = INNER_SYSTEM_PROMPT;
       else innerMessages.unshift({ role: 'system', content: INNER_SYSTEM_PROMPT });
-      innerMessages.push({ role: 'user', content: message });
+      // 多步任务检测 → 注入 todo 提醒到 user 消息尾部（实测 agnes-2.5-flash 无视 system 程序指令，
+      // 但对紧邻任务文本遵循度高；注入落盘，历史中形成使用示范）
+      let finalMsg = message;
+      if (isMultiStepTask(message)) {
+        finalMsg = message + '\n\n[框架提示] 本任务为多步任务。开始执行前必须先用 todo 插件建立任务清单（每个步骤一条 todo.add），此后每完成一步立即 todo.toggle(id=...) 勾选，全部完成时清单应全为 [x]。';
+        send({ type: 'info', text: '检测到多步任务，已注入任务清单提醒' });
+      }
+      innerMessages.push({ role: 'user', content: finalMsg });
       persistInnerMessages();
       const callPlugin = async (name, args) => {
         const t0 = Date.now();

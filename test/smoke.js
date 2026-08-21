@@ -269,7 +269,7 @@ async function main() {
     } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg, isMultiStepTask } = require(path.join(ROOT, 'lib', 'inner'));
   const { preflight, pluginScores } = require(path.join(ROOT, 'lib', 'regression'));
   await t('regression 预检：坏结构插件被拦截（params/run 缺失、第三方模块、语法错）', async () => {
     const bad = await preflight([{ action: 'create', plugin: 't-bad', code: 'module.exports = { run: "x" };' }]);
@@ -427,6 +427,20 @@ async function main() {
     assert.ok(m.content.includes('缓存命中 600'), '含缓存累计');
     assert.ok(m.content.includes('usage 插件'), '指引插件查询');
     assert.ok(m.content.includes('禁止自行估算'), '禁止脑补口径声明');
+  });
+  await t('isMultiStepTask：多步任务判定（正例）', () => {
+    assert.ok(isMultiStepTask('第一步做 A，第二步做 B，最后总结'), '第 N 步 ×2 + 最后');
+    assert.ok(isMultiStepTask('1. 写文件 2. 读文件 3. 对比'), '编号列表 ≥2');
+    assert.ok(isMultiStepTask('先查目录，然后读文件，接着改内容'), '连接词 ≥2');
+    assert.ok(isMultiStepTask('①创建 ②验证'), '带圈编号 ×2');
+    assert.ok(isMultiStepTask('第一步先分析文件，然后给出方案'), '编号 1 + 连接词 1 组合');
+  });
+  await t('isMultiStepTask：简单任务不误判（反例，防浪费轮次建清单）', () => {
+    assert.ok(!isMultiStepTask('看一下当前目录有什么文件'), '单步浏览');
+    assert.ok(!isMultiStepTask('帮我写一个 hello world'), '单步写文件');
+    assert.ok(!isMultiStepTask('再报告一次结果'), '「再」后接报告不计数');
+    assert.ok(!isMultiStepTask(''), '空消息');
+    assert.ok(!isMultiStepTask('版本号是 1. 0 吗'), '单词后的编号不计数');
   });
   // mock SSE 响应构造：一次 enqueue 全部 data 行（解析器按 \n 切分，单块即可覆盖缓冲逻辑）
   const sseResponse = (lines) => {
