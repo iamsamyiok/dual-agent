@@ -37,6 +37,15 @@ function parseFrontmatter(text) {
   return Object.keys(fm).length ? fm : null;
 }
 
+// 描述截断：优先在词/句边界断开并加省略号，避免截在词中间
+function clipDesc(s, max = 160) {
+  const str = String(s || '').trim();
+  if (str.length <= max) return str;
+  const cut = str.slice(0, max);
+  const boundary = Math.max(cut.lastIndexOf(' '), cut.lastIndexOf('。'), cut.lastIndexOf('，'), cut.lastIndexOf('；'), cut.lastIndexOf('、'));
+  return (boundary > max * 0.6 ? cut.slice(0, boundary) : cut).trimEnd() + '…';
+}
+
 // 扫描一个根下的全部技能：目录型（含 SKILL.md）+ 单文件型
 // 返回 [{ name, desc, kind: 'dir'|'file', dir, entry }]；目录型 name 取 frontmatter.name（回退目录名）
 function scanRoot(dir) {
@@ -56,7 +65,7 @@ function scanRoot(dir) {
         if (fm && fm.description) desc = fm.description;
         if (!desc) desc = text.split('\n').find(l => l.trim() && !l.startsWith('---')).replace(/^#+\s*/, '').slice(0, 120);
       } catch { /* 读失败按目录名列出 */ }
-      out.push({ name, desc: desc.slice(0, 160), kind: 'dir', dir, entry });
+      out.push({ name, desc: clipDesc(desc), kind: 'dir', dir, entry });
     } else if (e.isFile() && e.name.endsWith('.md')) {
       const name = e.name.replace(/\.md$/, '');
       let head = '';
@@ -65,7 +74,7 @@ function scanRoot(dir) {
         const fm = parseFrontmatter(text); // 单文件也兼容 frontmatter（description 优先）
         head = (fm && fm.description) || text.split('\n').find(l => l.trim() && !l.startsWith('---')).replace(/^#+\s*/, '');
       } catch { /* ignore */ }
-      out.push({ name, desc: String(head || '').slice(0, 160), kind: 'file', dir, entry: path.join(dir, e.name) });
+      out.push({ name, desc: clipDesc(head), kind: 'file', dir, entry: path.join(dir, e.name) });
     }
   }
   return out;
@@ -138,10 +147,25 @@ module.exports = {
     // ========== get：渐进式第二级——载入全文（SKILL.md 或单文件） ==========
     if (action === 'get') {
       const text = fs.readFileSync(found.entry, 'utf8');
-      const relRoot = path.relative(ctx.cwd, path.dirname(found.entry));
-      const resDir = found.kind === 'dir'
-        ? `（目录型技能：捆绑的 scripts/ references/ assets/ 等相对路径文件可用 read 插件读取，根目录 ${relRoot}${found.root && found.root !== path.join(ctx.cwd, 'skills') ? '（全局共享技能）' : ''}）\n`
-        : '';
+      let resDir = '';
+      if (found.kind === 'dir') {
+        // 框架自动扫描捆绑资源，生成可直接照抄的 skill: 路径清单（把"按正文引用读文件"变成具体行动项）
+        const skillDir = path.dirname(found.entry);
+        const files = [];
+        (function walk(dir, rel) {
+          let entries = [];
+          try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+          for (const e of entries) {
+            if (e.name === 'SKILL.md' || e.name.startsWith('.')) continue;
+            const p2 = path.join(dir, e.name);
+            const r2 = rel ? `${rel}/${e.name}` : e.name;
+            if (e.isDirectory()) walk(p2, r2);
+            else files.push({ rel: r2, size: fs.statSync(p2).size });
+          }
+        })(skillDir, '');
+        const list = files.map(f => `  - skill:${found.name}/${f.rel}（${f.size} 字节）`).join('\n');
+        resDir = `【目录型技能】捆绑资源清单（read 插件直接用下列 path 读取；正文引用其中文件时必须先读再用，禁止跳过或凭空自造替代）：\n${list || '  （无捆绑文件）'}\n\n`;
+      }
       return `${resDir}${text}`;
     }
 

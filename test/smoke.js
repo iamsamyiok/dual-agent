@@ -183,6 +183,46 @@ async function main() {
       process.env.DUAL_AGENT_SKILLS_SHARED = prev;
     }
   });
+  await t('read 插件：skill: 协议直读技能捆绑资源（含就近优先与 frontmatter 名匹配）', async () => {
+    const shared = path.join(TMP, 'skills-shared2');
+    // 目录名与 frontmatter name 不同：验证 frontmatter 名也可命中
+    fs.mkdirSync(path.join(shared, 'My Fancy Tool'), { recursive: true });
+    fs.writeFileSync(path.join(shared, 'My Fancy Tool', 'SKILL.md'), '---\nname: fancy-tool\ndescription: 测试名解析\n---\n\n# 正文', 'utf8');
+    fs.mkdirSync(path.join(shared, 'My Fancy Tool', 'templates'), { recursive: true });
+    fs.writeFileSync(path.join(shared, 'My Fancy Tool', 'templates', 'viewer.html'), '<html>TEMPLATE</html>', 'utf8');
+    const prev = process.env.DUAL_AGENT_SKILLS_SHARED;
+    process.env.DUAL_AGENT_SKILLS_SHARED = shared;
+    try {
+      // 1. frontmatter 名 + 技能内相对路径
+      const r1 = await plugins.runPlugin('read', { path: 'skill:fancy-tool/templates/viewer.html' }, ctx);
+      assert.ok(r1.includes('TEMPLATE'), 'skill: 协议应解析到捆绑资源：' + r1.slice(0, 120));
+      // 2. skill:名 直接读 SKILL.md 本体
+      const r2 = await plugins.runPlugin('read', { path: 'skill:fancy-tool' }, ctx);
+      assert.ok(r2.includes('# 正文'), 'skill:名 应默认读 SKILL.md');
+      // 3. 工作区同名技能就近优先
+      const wsDir = path.join(WS, 'skills', 'fancy-tool');
+      fs.mkdirSync(path.join(wsDir, 'templates'), { recursive: true });
+      fs.writeFileSync(path.join(wsDir, 'SKILL.md'), '---\nname: fancy-tool\ndescription: 本地版\n---\n\n# 本地', 'utf8');
+      fs.writeFileSync(path.join(wsDir, 'templates', 'viewer.html'), '<html>LOCAL</html>', 'utf8');
+      const r3 = await plugins.runPlugin('read', { path: 'skill:fancy-tool/templates/viewer.html' }, ctx);
+      assert.ok(r3.includes('LOCAL'), '工作区技能应优先命中');
+      fs.rmSync(wsDir, { recursive: true, force: true });
+      // 4. miss 时错误信息列出可用技能（框架层把 throw 转返回字符串，断言其内容）
+      const miss = await plugins.runPlugin('read', { path: 'skill:no-such/templates/x.html' }, ctx);
+      assert.ok(String(miss).includes('fancy-tool') && String(miss).includes('未命中'), 'miss 应提示可用技能名：' + miss);
+    } finally {
+      process.env.DUAL_AGENT_SKILLS_SHARED = prev;
+    }
+  });
+  await t('skill 插件：list 描述按词边界截断（不截在词中间）', async () => {
+    const skDir = path.join(WS, 'skills', 'clip-test');
+    fs.mkdirSync(skDir, { recursive: true });
+    fs.writeFileSync(path.join(skDir, 'SKILL.md'), `---\nname: clip-test\ndescription: ${'word '.repeat(40).trim()}\n---\n\n正文`, 'utf8');
+    const list = await plugins.runPlugin('skill', { action: 'list' }, ctx);
+    const line = list.split('\n').find(l => l.includes('clip-test'));
+    assert.ok(/ word…$/.test(line), '截断应落在完整词后（不切词一半）：...' + line.slice(-40));
+    fs.rmSync(skDir, { recursive: true, force: true });
+  });
 
   const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT } = require(path.join(ROOT, 'lib', 'inner'));
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {

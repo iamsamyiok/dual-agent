@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.7.0';
+const APP_VERSION = '0.7.1';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -206,6 +206,11 @@ const INNER_SYSTEM_PROMPT = [
   '## 任务执行前必须：',
   '1. 先调用 memory.search(query="任务关键词") 检索相关记忆，将结果作为背景参考',
   '2. 调用 skill.list() 查看技能库（渐进式：list 只给名称+描述），发现与任务相关的技能必须 skill.get(name) 读全文并按其步骤执行',
+  '',
+  '## 技能执行纪律（重要）：',
+  '- 技能全文就是操作手册：其中要求的每个步骤（读模板、跑脚本、按格式输出）都必须照做',
+  '- SKILL.md 正文引用的捆绑文件用 read 读取，path 填 "skill:技能名/正文相对路径"（如 skill:pdf/scripts/run.py），框架自动定位技能目录',
+  '- 正文未引用的相对路径也可用同法读取；禁止跳过步骤后凭空自造替代品',
   '',
   '## 记忆与技能使用规则（重要）：',
   '1. 完成任务后，如果学到新信息（用户偏好、项目结构、技术选型），调用 memory.save(level="long", content="...", tags=["偏好","项目"]) 记录到长期记忆',

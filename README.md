@@ -105,15 +105,18 @@ module.exports = {
 - **目录型（标准）**：`skills/<name>/SKILL.md`（YAML frontmatter 至少含 `name` + `description`），可捆绑 `scripts/` `references/` `assets/`，把技能目录直接拷进来即被发现
 - **单文件型（本系统简化格式）**：`skills/<name>.md`，首行标题即描述
 - **两个搜索根**：工作区 `workspaces/<ws>/skills/`（就近优先）+ 项目根 `skills/`（全局共享，放通用技能）
-- **渐进式加载**（与标准三阶段一致）：`skill.list()` 只载名称+描述（约 100 token/技能）→ 相关时 `skill.get(name)` 读全文 → 捆绑资源按需用 `read` 插件读取
+- **渐进式加载**（与标准三阶段一致）：`skill.list()` 只载名称+描述（约 100 token/技能）→ 相关时 `skill.get(name)` 读全文（目录型自动附捆绑资源清单）→ 捆绑资源按需用 `read` 插件读取
+- **`skill:` 协议**（read 插件）：SKILL.md 正文里的相对路径引用（如 `templates/viewer.html`）直接加前缀照抄可读——`read(path="skill:<技能名>/templates/viewer.html")`，框架自动定位技能目录（工作区优先），技能名与 frontmatter `name` 或目录名匹配均可；`skill:<名>` 不带路径则读 SKILL.md 本体
 - 同名技能工作区版本覆盖全局共享版本
 - `DUAL_AGENT_SKILLS_SHARED` 环境变量可覆盖全局共享目录位置
+
+实测案例：拷入官方仓库 [anthropics/skills](https://github.com/anthropics/skills) 的 `algorithmic-art` 技能（SKILL.md + templates/），内层自动完成 发现 → get 读全文 → `skill:` 协议读出 viewer.html / generator_template.js 模板 → 基于模板产出含交互参数面板的生成艺术（跳过模板凭空自写的问题由资源清单 + 技能执行纪律规则根治）。
 
 ## 测试
 
 ```bash
 node test/smoke.js
-# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（53 项断言）
+# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（55 项断言）
 ```
 
 ## 环境变量
