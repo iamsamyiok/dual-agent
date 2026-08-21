@@ -24,17 +24,25 @@
   /* 三栏主体 */
   main { flex: 1; min-height: 0; display: flex; position: relative; }
   .col { display: flex; flex-direction: column; min-width: 0; background: #fff; transition: margin-left 0.2s, width 0.2s; }
-  .col.collapsed { overflow: hidden; }
+  .col.collapsed { overflow: hidden; cursor: pointer; }
   .col-head { height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid #e5e7eb; flex-shrink: 0; font-weight: 600; font-size: 13px; }
   .col-head .hint { font-weight: 400; font-size: 11px; color: #9ca3af; }
   .col-head .toggle-btn { font-size: 11px; border: 1px solid #d1d5db; background: #fff; border-radius: 4px; padding: 1px 6px; cursor: pointer; color: #6b7280; margin-left: auto; }
   .col-head .toggle-btn:hover { border-color: #3b82f6; color: #3b82f6; }
   #pluginCol { width: 270px; flex-shrink: 0; border-right: 1px solid #e5e7eb; }
-  #pluginCol.collapsed { width: 0; min-width: 0; border: none; }
+  #pluginCol.collapsed { width: 42px; min-width: 42px; }
   #innerCol { flex: 1.2; border-right: 1px solid #e5e7eb; }
-  #innerCol.collapsed { flex: 0 0 0; min-width: 0; border: none; }
-  #outerCol { flex: 1; }
-  #outerCol.collapsed { flex: 0 0 0; min-width: 0; border: none; }
+  #innerCol.collapsed { flex: 0 0 42px; min-width: 42px; }
+  #outerCol { flex: 1; border-left: 1px solid #e5e7eb; }
+  #outerCol.collapsed { flex: 0 0 42px; min-width: 42px; }
+  /* 折叠窄条：内容隐藏，垂直标题 + 展开箭头，点击任意处展开 */
+  .col.collapsed { overflow: hidden; cursor: pointer; }
+  .col.collapsed > *:not(.col-rail) { display: none !important; }
+  .col-rail { display: none; }
+  .col.collapsed .col-rail { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 12px 0; height: 100%; }
+  .rail-title { writing-mode: vertical-rl; letter-spacing: 3px; font-size: 12px; color: #6b7280; font-weight: 600; user-select: none; white-space: nowrap; }
+  .rail-arrow { font-size: 13px; color: #9ca3af; flex-shrink: 0; }
+  .col.collapsed .col-rail:hover .rail-title { color: #3b82f6; }
   /* 移动端切换按钮 */
   .mobile-toggle { display: none; position: fixed; bottom: 80px; right: 16px; z-index: 100; background: #3b82f6; color: #fff; border: none; border-radius: 50%; width: 44px; height: 44px; font-size: 18px; box-shadow: 0 2px 8px rgba(0,0,0,0.2); cursor: pointer; }
   @media (max-width: 768px) {
@@ -204,6 +212,7 @@
       <button class="mini-btn" id="addPluginBtn" onclick="openPluginEditor('')">＋ 新建插件</button>
       <button class="mini-btn" style="margin: 0 8px 8px" onclick="$('importFile').click()">⬆ 导入插件</button>
       <input type="file" id="importFile" accept=".js,text/javascript" style="display:none" onchange="importPlugin(this)">
+      <div class="col-rail" onclick="toggleCol('pluginCol')" title="展开插件管理"><span class="rail-arrow">»</span><span class="rail-title">插件管理</span></div>
     </section>
 
     <!-- 中：内层对话 -->
@@ -222,6 +231,7 @@
         <input id="innerInput" placeholder="给内层下任务（执行中输入锁定）" autocomplete="off">
         <button id="innerSendBtn" onclick="innerSend()">发送</button>
       </div>
+      <div class="col-rail" onclick="toggleCol('innerCol')" title="展开内层对话"><span class="rail-arrow">»</span><span class="rail-title">内层 Agent</span></div>
     </section>
 
     <!-- 右：外层对话 -->
@@ -254,6 +264,7 @@
         </div>
         <div id="approvalPanel"></div>
       </div>
+      <div class="col-rail" onclick="toggleCol('outerCol')" title="展开外层对话"><span class="rail-arrow">«</span><span class="rail-title">外层 OpenCode</span></div>
     </section>
   </main>
 
@@ -351,7 +362,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.6.1';
+const PAGE_VERSION = '0.7.0';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -1070,25 +1081,20 @@ function updateMobileToggle() {
 }
 
 function initCollapsible() {
+  if (window.innerWidth <= 768) {
+    // 移动端：单面板模式，恢复上次选中面板
+    const savedPanel = parseInt(localStorage.getItem('da-mobile-panel')) || 1;
+    showMobilePanel(savedPanel);
+    return;
+  }
+  // 桌面端：恢复各列折叠状态（窄条模式，点窄条可展开）
   ['pluginCol', 'innerCol', 'outerCol'].forEach(id => {
     const el = $(id);
     const collapsed = localStorage.getItem('da-' + id + '-collapsed') === '1';
-    if (collapsed) {
-      el.classList.add('collapsed');
-      const btn = el.querySelector('.col-head .toggle-btn');
-      if (btn) btn.textContent = '◈';
-    }
+    el.classList.toggle('collapsed', collapsed);
+    const btn = el.querySelector('.col-head .toggle-btn');
+    if (btn) btn.textContent = collapsed ? '◈' : '✕';
   });
-  // 移动端初始化
-  if (window.innerWidth <= 768) {
-    const savedPanel = parseInt(localStorage.getItem('da-mobile-panel')) || 1;
-    showMobilePanel(savedPanel);
-  } else {
-    // 桌面端默认显示所有面板
-    document.querySelectorAll('.col').forEach(el => {
-      el.classList.remove('collapsed', 'active');
-    });
-  }
 }
 
 window.addEventListener('resize', () => {

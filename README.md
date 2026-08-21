@@ -79,7 +79,7 @@ module.exports = {
 - 预装 9 个插件：
   - 工具类：read / write（覆盖走原子写、append 带重试幂等保护、智能区分续写误用与整体重构）/ edit / bash / fetch（网页抓取转文本）/ search（免 key 多引擎搜索：Serper → Bing → DuckDuckGo 降级链）
   - 记忆类：memory（跨会话持久记忆，存工作区 `.memory-short.json` / `.memory-long.json`，单调递增 id）
-  - 技能类：skill（任务方法论沉淀，markdown 存工作区 `skills/`）
+  - 技能类：skill（方法论沉淀 + **兼容 Agent Skills 开放标准**：社区技能目录直接拷入即用，详见下文）
   - 任务类：todo（跨轮任务清单，存工作区 `.todo.json`）
 - 前端「新建插件」提供三类模板（工具 / 记忆 / 技能），一键预填骨架代码
 - 热插拔：审批通过或手动保存后自动热加载（清 require 缓存），内层无需重启
@@ -98,11 +98,22 @@ module.exports = {
 
 每个工作区一个任务域（`workspaces/<name>/`）：内层会话（`inner-messages.json` 分片存档，切走再切回历史完整恢复）、记忆、技能、任务清单随工作区隔离；插件全局共享。
 
+## Agent Skills 兼容（开放标准）
+
+内层技能库兼容 [Agent Skills](https://agentskills.io/) 开放标准（Claude Code / OpenCode / Cursor 等通用），社区现成技能**零适配直接使用**：
+
+- **目录型（标准）**：`skills/<name>/SKILL.md`（YAML frontmatter 至少含 `name` + `description`），可捆绑 `scripts/` `references/` `assets/`，把技能目录直接拷进来即被发现
+- **单文件型（本系统简化格式）**：`skills/<name>.md`，首行标题即描述
+- **两个搜索根**：工作区 `workspaces/<ws>/skills/`（就近优先）+ 项目根 `skills/`（全局共享，放通用技能）
+- **渐进式加载**（与标准三阶段一致）：`skill.list()` 只载名称+描述（约 100 token/技能）→ 相关时 `skill.get(name)` 读全文 → 捆绑资源按需用 `read` 插件读取
+- 同名技能工作区版本覆盖全局共享版本
+- `DUAL_AGENT_SKILLS_SHARED` 环境变量可覆盖全局共享目录位置
+
 ## 测试
 
 ```bash
 node test/smoke.js
-# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（51 项断言）
+# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（53 项断言）
 ```
 
 ## 环境变量

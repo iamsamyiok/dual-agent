@@ -145,6 +145,44 @@ async function main() {
     assert.ok((await plugins.runPlugin('skill', { action: 'get', name: 't1' }, ctx)).includes('# 标题'));
     assert.ok((await plugins.runPlugin('skill', { action: 'save', name: '../bad', content: 'x' }, ctx)).includes('不合法'));
   });
+  await t('skill 插件：Agent Skills 标准目录型（SKILL.md + frontmatter）', async () => {
+    // 目录型技能拷入工作区 skills/ 即被发现（社区技能零适配直接用）
+    const skDir = path.join(WS, 'skills', 'pdf-processing');
+    fs.mkdirSync(skDir, { recursive: true });
+    fs.writeFileSync(path.join(skDir, 'SKILL.md'), '---\nname: pdf-processing\ndescription: Extract PDF text and fill forms. Use when handling PDFs.\n---\n\n# 步骤\n1. 提取文本', 'utf8');
+    fs.mkdirSync(path.join(skDir, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(skDir, 'scripts', 'extract.py'), 'print(1)', 'utf8');
+    const list = await plugins.runPlugin('skill', { action: 'list' }, ctx);
+    assert.ok(list.includes('pdf-processing') && list.includes('Extract PDF text'), 'frontmatter description 应进入 list：' + list.slice(0, 300));
+    assert.ok(!list.includes('# 步骤'), '渐进式：list 不含正文');
+    const full = await plugins.runPlugin('skill', { action: 'get', name: 'pdf-processing' }, ctx);
+    assert.ok(full.includes('# 步骤') && full.includes('目录型技能') && full.includes('scripts'), 'get 应返回全文与捆绑资源提示');
+    const del = await plugins.runPlugin('skill', { action: 'delete', name: 'pdf-processing' }, ctx);
+    assert.ok(del.includes('目录型'), del);
+    assert.ok(!fs.existsSync(skDir), '删除应移除整个技能目录');
+  });
+  await t('skill 插件：全局共享目录 + 工作区同名就近优先', async () => {
+    const shared = path.join(TMP, 'skills-shared');
+    fs.mkdirSync(path.join(shared, 'common-greet'), { recursive: true });
+    fs.writeFileSync(path.join(shared, 'common-greet', 'SKILL.md'), '---\nname: common-greet\ndescription: 全局共享版本\n---\n\n全局', 'utf8');
+    const prev = process.env.DUAL_AGENT_SKILLS_SHARED;
+    process.env.DUAL_AGENT_SKILLS_SHARED = shared;
+    try {
+      let list = await plugins.runPlugin('skill', { action: 'list' }, ctx);
+      assert.ok(list.includes('common-greet') && list.includes('全局共享版本'), '共享目录技能应被发现：' + list.slice(0, 200));
+      // 工作区放同名技能 → 就近优先
+      const wsDir = path.join(WS, 'skills', 'common-greet');
+      fs.mkdirSync(wsDir, { recursive: true });
+      fs.writeFileSync(path.join(wsDir, 'SKILL.md'), '---\nname: common-greet\ndescription: 工作区覆盖版本\n---\n\n本地', 'utf8');
+      list = await plugins.runPlugin('skill', { action: 'list' }, ctx);
+      assert.ok(list.includes('工作区覆盖版本') && !list.includes('全局共享版本'), '工作区应覆盖全局：' + list.slice(0, 200));
+      const full = await plugins.runPlugin('skill', { action: 'get', name: 'common-greet' }, ctx);
+      assert.ok(full.includes('本地'), 'get 应返回工作区版本');
+      fs.rmSync(wsDir, { recursive: true, force: true });
+    } finally {
+      process.env.DUAL_AGENT_SKILLS_SHARED = prev;
+    }
+  });
 
   const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT } = require(path.join(ROOT, 'lib', 'inner'));
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
