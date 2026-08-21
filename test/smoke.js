@@ -223,8 +223,101 @@ async function main() {
     assert.ok(/ word…$/.test(line), '截断应落在完整词后（不切词一半）：...' + line.slice(-40));
     fs.rmSync(skDir, { recursive: true, force: true });
   });
+  await t('skill 插件：多行 YAML frontmatter（折叠/字面/续行）零适配解析', async () => {
+    const skDir = path.join(WS, 'skills', 'multi-line-demo');
+    fs.mkdirSync(skDir, { recursive: true });
+    fs.writeFileSync(path.join(skDir, 'SKILL.md'),
+      '---\nname: multi-line-demo\ndescription: >-\n  折叠标量第一行，\n  第二行继续描述。\nlicense: MIT\n---\n\n# 正文', 'utf8');
+    try {
+      const list = await plugins.runPlugin('skill', { action: 'list' }, ctx);
+      const line = list.split('\n').find(l => l.includes('multi-line-demo'));
+      assert.ok(line && line.includes('折叠标量第一行， 第二行继续描述'), '折叠标量应折成单行：' + line);
+      const get = await plugins.runPlugin('skill', { action: 'get', name: 'multi-line-demo' }, ctx);
+      assert.ok(get.includes('# 正文'), 'get 正常');
+    } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
+    // 字面量块（|）：描述保留换行（list 中折行显示为空格拼接也接受，但不允许读出 "|" 字面量）
+    fs.mkdirSync(skDir, { recursive: true });
+    fs.writeFileSync(path.join(skDir, 'SKILL.md'),
+      '---\nname: multi-line-demo\ndescription: |\n  字面量块第一行\n  字面量块第二行\n---\n\n# 正文', 'utf8');
+    try {
+      const list = await plugins.runPlugin('skill', { action: 'list' }, ctx);
+      assert.ok(!list.includes('|'), '块标量符号不应泄漏到描述：' + list.split('\n').find(l => l.includes('multi-line-demo')));
+      assert.ok(list.includes('字面量块第一行'), '字面量内容应被读取');
+    } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
+    // 普通标量续行
+    fs.mkdirSync(skDir, { recursive: true });
+    fs.writeFileSync(path.join(skDir, 'SKILL.md'),
+      '---\nname: multi-line-demo\ndescription: 起始描述\n  接着的一行\n---\n\n# 正文', 'utf8');
+    try {
+      const list = await plugins.runPlugin('skill', { action: 'list' }, ctx);
+      const line = list.split('\n').find(l => l.includes('multi-line-demo'));
+      assert.ok(line && line.includes('起始描述 接着的一行'), '续行应并入：' + line);
+    } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
+  });
 
   const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT } = require(path.join(ROOT, 'lib', 'inner'));
+  const { withRetry, RetryableError, isRetryableStatus, isRateLimitText } = require(path.join(ROOT, 'lib', 'llmRetry'));
+  await t('llmRetry：限流 429 → 退避后重试成功（info 事件可见）', async () => {
+    let n = 0;
+    const events = [];
+    const r = await withRetry(async () => {
+      n += 1;
+      if (n === 1) throw new RetryableError('API 429：rate limit exceeded');
+      return 'OK';
+    }, { onEvent: e => events.push(e), label: '内层 LLM', baseMs: 1 });
+    assert.equal(r, 'OK');
+    assert.equal(n, 2, '第二次成功');
+    assert.equal(events.length, 1, '一次退避提示');
+    assert.ok(events[0].text.includes('自动重试（第 1/4 次）'), events[0].text);
+  });
+  await t('llmRetry：持续限流 → 3^n 序列重试 4 次后耗尽抛错', async () => {
+    let n = 0;
+    const events = [];
+    let threw = '';
+    try {
+      await withRetry(async () => { n += 1; throw new RetryableError('API 429'); }, { onEvent: e => events.push(e), baseMs: 1 });
+    } catch (e) { threw = e.message; }
+    assert.equal(n, 5, '1 次初始 + 4 次重试');
+    assert.equal(events.length, 4, '4 条退避提示');
+    assert.ok(events.every(e => /秒后自动重试/.test(e.text)), '每条提示含等待秒数');
+    assert.ok(/429/.test(threw), '最终抛出原限流错误');
+  });
+  await t('llmRetry：退避时长按 3^n 递增（3s→9s→27s→81s 对应 base*3^n）', async () => {
+    const events = [];
+    const t0 = Date.now();
+    try {
+      await withRetry(async () => { throw Object.assign(new Error('too many requests'), { retryable: true }); }, { onEvent: e => events.push(e), baseMs: 5 });
+    } catch { /* 耗尽 */ }
+    const el = Date.now() - t0;
+    // 5+15+45+135 = 200ms 退避总量下限（毫秒误差放宽）
+    assert.ok(el >= 180, `4 次退避总时长应 ≥ base*(3^0+3^1+3^2+3^3)：实际 ${el}ms`);
+    assert.equal(events.length, 4);
+  });
+  await t('llmRetry：非限流错误（400 参数错）立即抛出不重试', async () => {
+    let n = 0;
+    let threw = '';
+    try {
+      await withRetry(async () => { n += 1; throw new Error('内层 API 400：invalid model'); }, { baseMs: 1 });
+    } catch (e) { threw = e.message; }
+    assert.equal(n, 1, '不重试');
+    assert.ok(/400/.test(threw));
+  });
+  await t('llmRetry：网络抖动（ECONNRESET code）→ 自动重试恢复', async () => {
+    let n = 0;
+    const r = await withRetry(async () => {
+      n += 1;
+      if (n === 1) throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+      return 42;
+    }, { baseMs: 1 });
+    assert.equal(r, 42);
+    assert.equal(n, 2);
+  });
+  await t('llmRetry：状态码与文本判定', () => {
+    assert.ok(isRetryableStatus(429) && isRetryableStatus(402) && isRetryableStatus(503));
+    assert.ok(!isRetryableStatus(400) && !isRetryableStatus(404) && !isRetryableStatus(500));
+    assert.ok(isRateLimitText('Rate limit reached') && isRateLimitText('请求过多，请稍后再试'));
+    assert.ok(!isRateLimitText('invalid api key'));
+  });
   await t('sanitize：键无引号/单引号/尾逗号 可修复', () => {
     assert.equal(sanitizeToolArguments(`{path: "a.html", content: 'x'}`), JSON.stringify({ path: 'a.html', content: 'x' }));
     assert.equal(sanitizeToolArguments(`{path: "a.html",}`), JSON.stringify({ path: 'a.html' }));

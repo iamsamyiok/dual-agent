@@ -362,7 +362,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.7.1';
+const PAGE_VERSION = '0.7.2';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -657,6 +657,7 @@ async function runOuterChat(text, displayText) {
   try {
     await streamSSE('/api/outer/chat', { message: text }, ev => {
       if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '外层 OpenCode'); cur.textContent = ev.text; scrollBottom('outerMsgs'); }
+      else if (ev.type === 'info') { appendMsg('outerMsgs', 'assistant', '⏳ ' + ev.text, '系统'); }
       else if (ev.type === 'notice') { appendMsg('outerMsgs', 'error', ev.content, ''); }
       else if (ev.type === 'proposals') {
         if (ev.count > 0) { loadProposals(); }
@@ -731,6 +732,7 @@ async function innerSend() {
   try {
     await streamSSE('/api/inner/chat', { message: text }, ev => {
       if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '内层 Agent'); cur.textContent = ev.text; scrollBottom('innerMsgs'); }
+      else if (ev.type === 'info') { appendMsg('innerMsgs', 'assistant', '⏳ ' + ev.text, '系统'); }
       else if (ev.type === 'tool_call' || ev.type === 'tool_result') {
         // 单条汇总状态条：不逐条显示工具调用（完整过程在 /process 过程页与 process.md）
         let bar = $('innerMsgs')._toolBar;

@@ -26,13 +26,54 @@ function toSlug(name) {
 }
 
 // 解析 SKILL.md 的 YAML frontmatter（name/description 等简单键值；无需完整 YAML 实现）
+// 兼容社区技能常见多行写法（Agent Skills 规范允许 YAML 折叠标量）：
+// - 块标量 description: >- / > / | / |-（后续更缩进行为值）
+// - 普通标量续行（下一行以空格开头则并入）
 function parseFrontmatter(text) {
   const m = String(text || '').match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
   if (!m) return null;
+  const lines = m[1].split('\n');
   const fm = {};
-  for (const line of m[1].split('\n')) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const kv = line.match(/^([a-zA-Z_-]+):\s*(.*)$/);
-    if (kv) fm[kv[1].toLowerCase()] = kv[2].trim().replace(/^["']|["']$/g, '');
+    if (!kv) continue; // 列表项（- xxx）与嵌套结构不支持（本系统用不到）
+    const key = kv[1].toLowerCase();
+    let val = kv[2].trim();
+    if (/^[>|][+-]?$/.test(val)) {
+      // 块标量：收集比键更深缩进的连续行；首行缩进决定剥离量
+      const keyIndent = line.length - line.replace(/^\s+/, '').length;
+      const block = [];
+      let blockIndent = -1;
+      let j = i + 1;
+      while (j < lines.length) {
+        const l = lines[j];
+        if (!l.trim()) { block.push(''); j++; continue; }
+        const ind = l.length - l.replace(/^\s+/, '').length;
+        if (ind <= keyIndent) break;
+        if (blockIndent < 0) blockIndent = ind;
+        block.push(l.slice(Math.min(blockIndent, l.length)));
+        j++;
+      }
+      i = j - 1;
+      if (val.startsWith('>')) {
+        // 折叠标量：换行折成空格（忽略 chomping 细节，本场景足够）
+        val = block.join(' ').replace(/\s+/g, ' ').trim();
+      } else {
+        val = block.join('\n').replace(/\n+$/, ''); // 字面量：保留换行
+      }
+    } else if (val) {
+      // 普通标量续行：后续更缩进行并入（YAML 多行 plain scalar）
+      let j = i + 1;
+      while (j < lines.length) {
+        const l = lines[j];
+        if (!l || !/^\s+\S/.test(l)) break;
+        val += ' ' + l.trim();
+        j++;
+      }
+      i = j - 1;
+    }
+    fm[key] = val.replace(/^["']|["']$/g, '').trim();
   }
   return Object.keys(fm).length ? fm : null;
 }

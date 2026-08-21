@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.7.1';
+const APP_VERSION = '0.7.2';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -409,6 +409,9 @@ const server = http.createServer(async (req, res) => {
             appendProcess(`\n### ${fmtClock(Date.now())} 🔧 ${ev.plugin}\n\n**入参**\n\n\`\`\`json\n${pretty}\n\`\`\`\n`);
           } else if (ev.type === 'tool_result') {
             appendProcess(`**结果** ${ev.ok ? '✓' : '✗'}（${ev.ms}ms）\n\n\`\`\`\n${String(ev.result)}\n\`\`\`\n`);
+          } else if (ev.type === 'info') {
+            flushText();
+            appendProcess(`\n### ${fmtClock(Date.now())} ⏳ ${String(ev.text || '')}\n`);
           } else if (ev.type === 'error') {
             flushText();
             appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);
@@ -475,6 +478,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const r = await outerMod.runOuter(runner, prompt, ROOT, ev => {
           if (ev.type === 'text') { fullText = ev.text; send(ev); }
+          else if (ev.type === 'info') send(ev); // 限流退避提示转发前端
           else if (ev.type === 'session' && ev.sessionId && ev.sessionId !== sessionId) {
             saveConfig({ outerSession: ev.sessionId }); // 首个 sessionID 回填，下次续聊
             send(ev);

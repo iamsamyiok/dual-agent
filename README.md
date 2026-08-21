@@ -112,11 +112,22 @@ module.exports = {
 
 实测案例：拷入官方仓库 [anthropics/skills](https://github.com/anthropics/skills) 的 `algorithmic-art` 技能（SKILL.md + templates/），内层自动完成 发现 → get 读全文 → `skill:` 协议读出 viewer.html / generator_template.js 模板 → 基于模板产出含交互参数面板的生成艺术（跳过模板凭空自写的问题由资源清单 + 技能执行纪律规则根治）。
 
+第二轮实测（skill-creator 元技能，33K 正文 + agents/assets/eval-viewer/references/scripts 五层捆绑资源）：内层按其流程 读 references/schemas.md 格式规范 → 创建目录型新技能（frontmatter + evals 用例），新技能即刻被 `skill.list()` 发现——零适配闭环。frontmatter 解析兼容多行 YAML（折叠 `>-` / 字面 `|` / 普通续行），社区技能常见写法无需修改。
+
+## LLM 限流自动重试
+
+内层 LLM 请求（建连 + 流式读取整体）与外层 opencode 评审会话共用指数退避重试（lib/llmRetry.js）：
+
+- **触发条件**：HTTP 429/402/503、响应体限流特征词（rate limit / quota / 限流 等）、网络抖动（ECONNRESET/ETIMEDOUT 等）
+- **退避序列**：3s → 9s → 27s → 81s（3^n），共 4 次重试；全部耗尽才报错，单次限流不再中断任务
+- **过程可见**：每次退避经 `info` 事件实时显示在前端对话流与 process 过程页（"X 秒后自动重试（第 n/4 次）"）
+- 非限流错误（如 400 参数错）立即失败不重试；`DUAL_AGENT_RETRY_BASE_MS` 可覆盖退避基数（测试注入）
+
 ## 测试
 
 ```bash
 node test/smoke.js
-# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（55 项断言）
+# 三段：全量语法检查 → 单元（lint/parse/插件/超时/审批管线）→ MOCK 模式 e2e（62 项断言）
 ```
 
 ## 环境变量
