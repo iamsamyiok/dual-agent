@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.1';
+const APP_VERSION = '0.9.2';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -375,10 +375,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/plugins/usage' && req.method === 'GET') {
       const action = String(parsed.query.action || '').trim();
+      const usageMod = require('./plugins/usage');
+      const usageCtx = { cwd: workspaceDir() }; // 与内层插件执行同源（inner-usage.json 按工作区落盘）
       if (action === 'get') {
-        json(res, 200, { success: true, data: require('./plugins/usage').getUsage() });
+        json(res, 200, { success: true, data: usageMod.getUsage(usageCtx) });
       } else if (action === 'history') {
-        json(res, 200, { success: true, data: require('./plugins/usage').getSessions() });
+        json(res, 200, { success: true, data: usageMod.getSessions(usageCtx) });
       } else {
         json(res, 400, { success: false, error: '未知 action，支持 get/history' });
       }

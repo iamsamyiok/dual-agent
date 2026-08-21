@@ -825,17 +825,21 @@ async function main() {
   });
 
   // ===== token 计量相关测试 =====
-  await t('usage 插件 get 返回零数据', async () => {
+  await t('usage 路由聚合：内层会话后返回累计数据（路径与落盘同源）', async () => {
     const r = await (await fetch(base + '/api/plugins/usage?action=get')).json();
-    assert.ok(r.success);
-    assert.equal(r.data.totalsPrompt, 0);
-    assert.equal(r.data.recent.length, 0);
+    assert.ok(r.success, JSON.stringify(r));
+    // mock 会话每次落盘 1 条（last: prompt 1400 / completion 90）；此前对话+并发测试至少 2 条
+    assert.ok(r.data.totalsCalls >= 2, `totalsCalls 应 ≥2（实际 ${r.data.totalsCalls}）——若为 0 说明路由与落盘路径分叉`);
+    assert.ok(r.data.totalsPrompt >= 2800, `totalsPrompt 应 ≥2800（实际 ${r.data.totalsPrompt}）`);
+    assert.ok(r.data.recent.length >= 1, 'recent 明细非空');
   });
 
-  await t('usage 插件 history 返回空会话', async () => {
+  await t('usage 插件 history 返回会话分组', async () => {
     const r = await (await fetch(base + '/api/plugins/usage?action=history')).json();
-    assert.ok(r.success);
+    assert.ok(r.success, JSON.stringify(r));
     assert.equal(Array.isArray(r.data.sessions), true);
+    assert.ok(r.data.sessions.length >= 1, '至少一个会话分组');
+    assert.ok(r.data.totalCalls >= 2, '会话总计调用数 ≥2');
   });
 
   srv.kill();
