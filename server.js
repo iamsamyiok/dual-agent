@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.8.1';
+const APP_VERSION = '0.9.0';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -220,11 +220,12 @@ const INNER_SYSTEM_PROMPT = [
   '5. memory 和 skill 是不同概念：memory 记事实/偏好（短句），skill 记方法/流程（长文档）',
   '6. 技能名规范：英文小写+连字符（如 chang-wen-fen-duan-xie-ru）或中文均可',
   '7. 保存记忆前先用 memory.search 检索是否已存在相似内容，避免重复',
-  '8. JSON 配置文件必须使用双引号，不能使用单引号',
-  '9. 任务完成后必须检查所有输出文件，确保格式正确',
-  '10. 回复必须简洁，不超过 100 字，直接输出结果，不要解释过程',
-  '11. 如果检索到相关记忆，必须在任务完成后保存重要发现到长期记忆',
-  '12. 系统提示优先级：JSON 双引号 > 目录结构 > 技术栈 > 测试覆盖',
+  '8. 被问到 token 用量/消耗/成本时：禁止凭感觉估算，必须调用 usage 插件（action=get 或 history）取真实数据作答，并区分"API 计费口径累计"与"净上下文"两个口径；对话中出现的 [token 计量] 注记也是真实数据，可直接引用',
+  '9. JSON 配置文件必须使用双引号，不能使用单引号',
+  '10. 任务完成后必须检查所有输出文件，确保格式正确',
+  '11. 回复必须简洁，不超过 100 字，直接输出结果，不要解释过程',
+  '12. 如果检索到相关记忆，必须在任务完成后保存重要发现到长期记忆',
+  '13. 系统提示优先级：JSON 双引号 > 目录结构 > 技术栈 > 测试覆盖',
   '',
   '## 工具调用规则：',
   '1. 每次工具调用都必须完整提供所有必填参数；同一轮并行发起多个调用时，path 等参数每次都要单独带上，不能省略或依赖上一条',
@@ -372,6 +373,17 @@ const server = http.createServer(async (req, res) => {
       res.end(code);
       return;
     }
+    if (p === '/api/plugins/usage' && req.method === 'GET') {
+      const action = String(parsed.query.action || '').trim();
+      if (action === 'get') {
+        json(res, 200, { success: true, data: require('./plugins/usage').getUsage() });
+      } else if (action === 'history') {
+        json(res, 200, { success: true, data: require('./plugins/usage').getSessions() });
+      } else {
+        json(res, 400, { success: false, error: '未知 action，支持 get/history' });
+      }
+      return;
+    }
 
     // ---------- 内层对话 ----------
     if (p === '/api/inner/chat' && req.method === 'POST') {
@@ -421,6 +433,18 @@ const server = http.createServer(async (req, res) => {
           } else if (ev.type === 'info') {
             flushText();
             appendProcess(`\n### ${fmtClock(Date.now())} ⏳ ${String(ev.text || '')}\n`);
+          } else if (ev.type === 'usage') {
+            // token 计量落盘：逐轮追加（当轮量 + 会话累计），usage 插件与审计由此取数
+            try {
+              const uf = path.join(WS_DIR, 'inner-usage.json');
+              let rows = [];
+              try { rows = JSON.parse(fs.readFileSync(uf, 'utf8')); } catch { /* 首次 */ }
+              if (!Array.isArray(rows)) rows = [];
+              rows.push({ ts: Date.now(), prompt: ev.last.prompt, completion: ev.last.completion, cached: ev.last.cached, est: !!ev.est,
+                totalsPrompt: ev.totals.prompt, totalsCompletion: ev.totals.completion, totalsCalls: ev.totals.calls });
+              fs.writeFileSync(uf, JSON.stringify(rows, null, 1), 'utf8');
+            } catch { /* 计量落盘失败不阻断会话 */ }
+            appendProcess(`\n> 📊 token（第 ${ev.totals.calls} 次调用${ev.est ? '，估算' : '，API 真实返回'}）：prompt ${ev.last.prompt} + 输出 ${ev.last.completion}；会话累计 prompt ${ev.totals.prompt} + 输出 ${ev.totals.completion}\n`);
           } else if (ev.type === 'error') {
             flushText();
             appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);

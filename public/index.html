@@ -221,7 +221,8 @@
     <section class="col active" id="innerCol">
       <div class="col-head">
         <span>内层 Agent</span>
-        <span class="hint" id="innerModelTag"></span>
+         <span class="hint" id="innerModelTag"></span>
+         <span class="hint" id="tokBadge" style="display:none;color:#059669" title="本会话真实 token 用量（API 返回，含缓存命中）；口径为每次调用全量重发上下文的计费累计"></span>
         <span class="grow" style="flex:1"></span>
         <button class="mini-btn" onclick="window.open('/process','_blank')" title="新页打开完整执行过程（全部插件调用的完整入参与结果）">📜 过程</button>
         <button class="mini-btn" onclick="resetInnerChat()" title="清空当前工作区的内层会话">清空会话</button>
@@ -364,7 +365,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.8.1';
+const PAGE_VERSION = '0.9.0';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -735,6 +736,13 @@ async function innerSend() {
   try {
     await streamSSE('/api/inner/chat', { message: text }, ev => {
       if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '内层 Agent'); cur.textContent = ev.text; scrollBottom('innerMsgs'); }
+      else if (ev.type === 'usage') {
+        const t = ev.totals || {};
+        const k = n => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n || 0));
+        const b = $('tokBadge');
+        b.style.display = 'inline';
+        b.textContent = `⚡ ${(ev.est ? '~' : '') + k(t.prompt)}+${k(t.completion)} tok` + (t.calls > 1 ? ` / ${t.calls} 次` : '');
+      }
       else if (ev.type === 'info') { appendMsg('innerMsgs', 'assistant', '⏳ ' + ev.text, '系统'); }
       else if (ev.type === 'tool_call' || ev.type === 'tool_result') {
         // 单条汇总状态条：不逐条显示工具调用（完整过程在 /process 过程页与 process.md）

@@ -269,7 +269,7 @@ async function main() {
     } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens } = require(path.join(ROOT, 'lib', 'inner'));
   const { preflight, pluginScores } = require(path.join(ROOT, 'lib', 'regression'));
   await t('regression 预检：坏结构插件被拦截（params/run 缺失、第三方模块、语法错）', async () => {
     const bad = await preflight([{ action: 'create', plugin: 't-bad', code: 'module.exports = { run: "x" };' }]);
@@ -709,6 +709,20 @@ async function main() {
     const codes = [a, b].map(x => x.status === 'fulfilled' ? x.value.status : -1);
     assert.ok(codes.some(c => c === 200), '至少一路成功');
     // mock 执行快，锁窗口小：409 可选出现，不强制
+  });
+
+  // ===== token 计量相关测试 =====
+  await t('usage 插件 get 返回零数据', async () => {
+    const r = await (await fetch(base + '/api/plugins/usage?action=get')).json();
+    assert.ok(r.success);
+    assert.equal(r.data.totalsPrompt, 0);
+    assert.equal(r.data.recent.length, 0);
+  });
+
+  await t('usage 插件 history 返回空会话', async () => {
+    const r = await (await fetch(base + '/api/plugins/usage?action=history')).json();
+    assert.ok(r.success);
+    assert.equal(Array.isArray(r.data.sessions), true);
   });
 
   srv.kill();
