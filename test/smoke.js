@@ -431,7 +431,7 @@ async function main() {
     } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg, isMultiStepTask, READONLY_PLUGINS, pairSafeTail } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg, isMultiStepTask, isLongFormTask, isRefusalNudge, READONLY_PLUGINS, pairSafeTail } = require(path.join(ROOT, 'lib', 'inner'));
   const { preflight, pluginScores } = require(path.join(ROOT, 'lib', 'regression'));
   await t('regression 预检：坏结构插件被拦截（params/run 缺失、第三方模块、语法错）', async () => {
     const bad = await preflight([{ action: 'create', plugin: 't-bad', code: 'module.exports = { run: "x" };' }]);
@@ -678,6 +678,38 @@ async function main() {
     assert.ok(!isMultiStepTask('再报告一次结果'), '「再」后接报告不计数');
     assert.ok(!isMultiStepTask(''), '空消息');
     assert.ok(!isMultiStepTask('版本号是 1. 0 吗'), '单词后的编号不计数');
+  });
+  // ===== 长文创作检测（v0.9.17 病根：模型以"万字超单次输出"为由拒绝万字任务）=====
+  await t('isLongFormTask：长文任务判定（正例）', () => {
+    assert.ok(isLongFormTask('帮我写个万字精彩长篇小说'), '万字+长篇小说');
+    assert.ok(isLongFormTask('写一篇 5000 字的短篇小说'), '显式字数+体裁');
+    assert.ok(isLongFormTask('来一篇 3千字 读后感'), '千字+空格');
+    assert.ok(isLongFormTask('给我写个小说，题材是赛博朋克'), '体裁无字数');
+    assert.ok(isLongFormTask('写一份深度调研报告'), '长文体裁');
+  });
+  await t('isLongFormTask：普通任务不误判（反例，防创作纪律污染常规执行）', () => {
+    assert.ok(!isLongFormTask('修复登录页的 bug'), '常规开发任务');
+    assert.ok(!isLongFormTask('总结 uploads/budget.pdf 的要点'), '文档处理任务');
+    assert.ok(!isLongFormTask('搜索一下最新的 Node.js 版本'), '调研任务');
+    assert.ok(!isLongFormTask(''), '空消息');
+    assert.ok(!isLongFormTask('这个文件有多少字'), '谈论字数非创作');
+  });
+  // ===== 拒绝后催促检测（v0.9.17 病根：拒绝万字 → "请你搞定" → 被旧记忆锚定跑偏）=====
+  await t('isRefusalNudge：拒绝后短催判定（正例）', () => {
+    const refusal = '抱歉，我无法创作万字长篇小说。这类任务超出单次输出限制，建议使用专业工具。';
+    assert.ok(isRefusalNudge(refusal, '请你搞定'), '标准催促');
+    assert.ok(isRefusalNudge(refusal, '搞定'), '极简催促');
+    assert.ok(isRefusalNudge(refusal, '写！'), '写+叹号');
+    assert.ok(isRefusalNudge('我不能这样做，不适合插件工作流', '做吧'), '另一形态拒绝');
+  });
+  await t('isRefusalNudge：非催促场景不误判（反例，防对齐指令乱入）', () => {
+    const refusal = '抱歉，我无法创作万字长篇小说，建议分解任务。';
+    assert.ok(!isRefusalNudge(refusal, '那就写一篇 2000 字的短文吧，重点写主角觉醒'), '带新要求的消息不是催促');
+    assert.ok(!isRefusalNudge(refusal, '请帮我读取 uploads/a.pdf 并总结要点'), '新任务指令');
+    assert.ok(!isRefusalNudge('任务完成，文件已写入 report.md', '请你搞定'), '上条非拒绝');
+    assert.ok(!isRefusalNudge(refusal, '为什么不行'), '疑问句非催促');
+    assert.ok(!isRefusalNudge(refusal, ''), '空消息');
+    assert.ok(!isRefusalNudge('', '请你搞定'), '无上文拒绝');
   });
   // mock SSE 响应构造：一次 enqueue 全部 data 行（解析器按 \n 切分，单块即可覆盖缓冲逻辑）
   const sseResponse = (lines) => {

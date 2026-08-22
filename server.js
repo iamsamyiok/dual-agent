@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.16';
+const APP_VERSION = '0.9.17';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -20,7 +20,7 @@ fs.mkdirSync(WS_ROOT, { recursive: true });
 const plugins = require('./lib/plugins');
 const approval = require('./lib/approval');
 const outerMod = require('./lib/outer');
-const { chatInner, isMultiStepTask, pairSafeTail } = require('./lib/inner');
+const { chatInner, isMultiStepTask, isLongFormTask, isRefusalNudge, pairSafeTail } = require('./lib/inner');
 const { validProfiles, pickProfile } = require('./lib/profiles');
 const { NET_CODES, withTaskResume } = require('./lib/llmRetry');
 const { extractIntent, formatIntentNote, buildVerifyArgs, buildJudgePrompt, parseVerdict, callLLMText } = require('./lib/intent');
@@ -293,7 +293,7 @@ const INNER_SYSTEM_PROMPT_BASE = [
   '你是内层执行 Agent，通过调用插件完成任务，完成后用简洁中文总结。当前日期：{TODAY}（涉及"最新/近期"的搜索与判断以此为准）。',
   '',
   '## 任务执行前必须：',
-  '1. 先调用 memory.search(query="任务关键词") 检索相关记忆，将结果作为背景参考',
+  '1. 先调用 memory.search(query="任务关键词") 检索相关记忆，将结果作为背景参考——注意：记忆是历史任务的沉淀，仅当内容与本任务直接相关才使用；与本任务话题无关的记忆必须忽略，禁止被旧任务记忆带偏当前任务的目标',
   '2. 调用 skill.list() 查看技能库（渐进式：list 只给名称+描述），发现与任务相关的技能必须 skill.get(name) 读全文并按其步骤执行',
   '3. 复杂任务必须先建任务清单：满足任一条件即算复杂——(a) 需要 ≥3 个执行步骤 (b) 涉及多个文件的创建/修改 (c) 用户消息含"然后/接着/再/最后"等多步标志。建法：每个步骤一次 todo.add(text="动宾短语")；此后每完成一步立即 todo.toggle(id=...) 勾选，开始下一步前如记不清进度就 todo.list() 查看；全部完成时清单应全为 [x]。禁止跳过建清单直接执行复杂任务',
   '4. 产出验证纪律：任务产出文件后，禁止只凭"我写了"就宣称完成。收尾前用 verify 插件断言关键产出（exists + contains 文本特征 + line_count 行数），多规则一次调用；看到 FAIL 必须修复后重新 verify，直到 PASS 才能总结',
@@ -301,6 +301,7 @@ const INNER_SYSTEM_PROMPT_BASE = [
   '6. 动态规划：每轮可见 [任务清单] 注记。执行中发现实际状况与计划不符（文件比预期大/依赖缺失/步骤顺序要变）必须先修订清单（todo.add 新步骤）再继续，禁止明知跑偏还硬走原计划',
   '7. 搜索纪律：搜索结果含"相关性"评分，低于 0.3 视为无效。连续 2 次无效后禁止再换关键词重搜——必须换策略：fetch 打开已有结果的正文（摘要常缺数据）、换英文关键词、或直取权威信源。多信源调研任务优先 subagent 并行派生，禁止主上下文堆搜索结果',
   '8. 收敛纪律：调研类任务的目标是"基于可获证据给出带不确定度标注的结论"，而非找到完美数据。接近轮数上限（可见 [轮数预算] 注记）时必须立即总结已有发现；搜不到精确数字时给出量级估计+推理依据+标注"无权威来源"，这是合格的交付',
+  '9. 执行者身份纪律：你是执行 Agent，一切任务通过插件工具流完成。创作类任务（长文/小说/报告/代码）没有"超出能力"一说——单次输出不够就分章分段写入文件（write 首段 + append 续写，每段 ≤1500 字符），轮数不够框架会自动续航。禁止以篇幅、难度、体裁为由拒绝或转介用户去别处',
   '',
   '## 技能执行纪律（重要）：',
   '- 技能全文就是操作手册：其中要求的每个步骤（读模板、跑脚本、按格式输出）都必须照做',
@@ -453,14 +454,35 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
  // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）；每次重建注入当天日期
  if (innerMessages[0] && innerMessages[0].role === 'system') innerMessages[0].content = buildInnerSystemPrompt();
  else innerMessages.unshift({ role: 'system', content: buildInnerSystemPrompt() });
- // 多步任务检测 → 注入 todo 提醒到 user 消息尾部（实测 agnes-2.5-flash 无视 system 程序指令，
- // 但对紧邻任务文本遵循度高；注入落盘，历史中形成使用示范）
- let finalMsg = message;
- const multiStep = isMultiStepTask(message);
- if (multiStep) {
-   finalMsg = message + '\n\n[框架提示] 本任务为多步任务，两项纪律：\n1) 开始执行前必须先用 todo 建任务清单（每个步骤一条 todo.add），每完成一步立即 todo.toggle(id=...)，全部完成时清单应全为 [x]。\n2) 收尾前必须用 verify 插件断言每个产出文件（exists + contains 内容特征 + line_count），看到 FAIL 先修复再重验，全 PASS 才能总结。';
-   send({ type: 'info', text: '检测到多步任务，已注入任务清单+产出验证提醒' });
- }
+      // 多步任务检测 → 注入 todo 提醒到 user 消息尾部（实测 agnes-2.5-flash 无视 system 程序指令，
+      // 但对紧邻任务文本遵循度高；注入落盘，历史中形成使用示范）
+      let finalMsg = message;
+      const multiStep = isMultiStepTask(message);
+      if (multiStep) {
+        finalMsg = message + '\n\n[框架提示] 本任务为多步任务，两项纪律：\n1) 开始执行前必须先用 todo 建任务清单（每个步骤一条 todo.add），每完成一步立即 todo.toggle(id=...)，全部完成时清单应全为 [x]。\n2) 收尾前必须用 verify 插件断言每个产出文件（exists + contains 内容特征 + line_count），看到 FAIL 先修复再重验，全 PASS 才能总结。';
+        send({ type: 'info', text: '检测到多步任务，已注入任务清单+产出验证提醒' });
+      }
+      // 长文创作任务（v0.9.17 病根：模型以"万字超单次输出限制"为由直接拒绝——
+      // 它没想到分章分段 write 工具流可以完成；自动续航 72 轮预算 + append 分段
+      // 写入足以支撑万字级产出）。注入创作纪律，并明确禁止拒绝
+      if (isLongFormTask(message)) {
+        finalMsg = message + '\n\n[框架提示] 本任务为长文创作任务，你必须用工具流完成，禁止以"超出输出能力/篇幅过长"为由拒绝（单次输出不够就分多次写文件）。执行纪律：\n' +
+          '1) 先规划章节：todo.add 每章一条（如"第一章 起势：冲突建立"），章节数按目标字数÷每章 600-800 字估算；\n' +
+          '2) 逐章写入文件：每章内部再分段——首次 write(path=文件名, content=本章第一段)，后续每段 write(同一路径, content=下一段, append=true)。每段 ≤1500 字符（API 流式传输对超大参数会截断，分段是硬要求，段与段不得重叠跳行）；\n' +
+          '3) 每完成一章 todo.toggle 勾选，再写下一章；全部章节完成后 verify 断言（exists + line_count + contains 关键情节词）；\n' +
+          '4) 最后输出交付说明：文件路径 + 章节目录 + 总字数估计。中途上下文被折叠属正常现象（[轮数预算]/[任务清单] 注记会告诉你进度），照常续写。';
+        send({ type: 'info', text: '检测到长文创作任务，已注入分章分段创作纪律' });
+      }
+      // 拒绝后催促对齐（v0.9.17 病根：模型拒绝万字任务 → 用户"请你搞定" → 模型被
+      // 工作区旧任务记忆锚定，回复完全跑偏到上一个话题）。检测：上一条 assistant
+      // 回复含拒绝话术 + 新消息短促催促 → 注入对齐指令（搞定的是刚才被拒的那件事）
+      if (innerMessages.length) {
+        const lastAssistant = [...innerMessages].reverse().find(m => m.role === 'assistant' && m.content);
+        if (lastAssistant && isRefusalNudge(lastAssistant.content, message)) {
+          finalMsg = message + `\n\n[框架提示] 你上一条回复以"无法/抱歉/建议"拒绝了用户的任务，本消息是用户要求你执行它的催促——指的就是刚才被你拒绝的那个任务，不是历史中的任何其他任务。现在必须开始执行：按长文/多步任务的工具流纪律（todo 建清单 → 分段 write → verify 验证）完成它；工作区记忆与历史中的旧任务内容（如有）仅为背景参考，与当前任务无关时必须忽略，禁止被带偏任务目标。`;
+          send({ type: 'info', text: '检测到拒绝后催促，已注入任务对齐指令' });
+        }
+      }
  // 意图契约抽取（v0.9.14 病根：长任务后段上下文折叠把任务原文埋进历史 → 交付漏项。
  // todo 治步骤执行，意图契约治要求覆盖）。仅多步任务 + 真实模式启用（DUAL_AGENT_INTENT=0 关闭）；
  // 抽取失败优雅降级返回 null，任务照常执行；换任务时旧契约必须清除（防过期要求污染后续任务）
