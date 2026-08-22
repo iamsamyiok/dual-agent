@@ -431,7 +431,7 @@ async function main() {
     } finally { fs.rmSync(skDir, { recursive: true, force: true }); }
   });
 
-  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, chatInnerReal, usageNoteMsg, isMultiStepTask, isLongFormTask, isRefusalNudge, READONLY_PLUGINS, pairSafeTail } = require(path.join(ROOT, 'lib', 'inner'));
+  const { sanitizeToolArguments, parseToolArgs, reassembleCalls, shouldStall, recordFail, STALL_LIMIT, budgetMessages, estimateChars, estimateTokens, estimateTokensV2, estimateMessagesTokens, chatInnerReal, usageNoteMsg, isMultiStepTask, isLongFormTask, isRefusalNudge, READONLY_PLUGINS, pairSafeTail } = require(path.join(ROOT, 'lib', 'inner'));
   const { preflight, pluginScores } = require(path.join(ROOT, 'lib', 'regression'));
   await t('regression 预检：坏结构插件被拦截（params/run 缺失、第三方模块、语法错）', async () => {
     const bad = await preflight([{ action: 'create', plugin: 't-bad', code: 'module.exports = { run: "x" };' }]);
@@ -483,29 +483,33 @@ async function main() {
     assert.ok(lg.some(m => (m.mergedFrom || []).length === 3), '长期库应有 3 条归并的条目');
   });
   await t('上下文预算：超阈值压缩旧 tool 结果（保配对、保近期全文）', () => {
+    // 构造足够大的消息使 token 数超过预算 60000
+    // 第一个大 tool 在最前面，确保不在"最近 6 个"保留集内
     const msgs = [
       { role: 'system', content: 'S'.repeat(5000) },
       { role: 'user', content: '任务' },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read', arguments: '{"path":"a"}' } }] },
-      { role: 'tool', tool_call_id: 'c1', content: 'A'.repeat(30000) },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'c2', type: 'function', function: { name: 'read', arguments: '{"path":"b"}' } }] },
-      { role: 'tool', tool_call_id: 'c2', content: 'B'.repeat(30000) },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'c3', type: 'function', function: { name: 'read', arguments: '{"path":"c"}' } }] },
-      { role: 'tool', tool_call_id: 'c3', content: 'C'.repeat(200) },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'c4', type: 'function', function: { name: 'read', arguments: '{"path":"d"}' } }] },
-      { role: 'tool', tool_call_id: 'c4', content: 'D'.repeat(200) },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'c5', type: 'function', function: { name: 'read', arguments: '{"path":"e"}' } }] },
-      { role: 'tool', tool_call_id: 'c5', content: 'E'.repeat(200) },
-      { role: 'assistant', content: null, tool_calls: [{ id: 'c6', type: 'function', function: { name: 'read', arguments: '{"path":"f"}' } }] },
-      { role: 'tool', tool_call_id: 'c6', content: 'F'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c0', type: 'function', function: { name: 'read', arguments: '{"path":"a"}' } }] },
+      { role: 'tool', tool_call_id: 'c0', content: 'A'.repeat(300000) }, // 第 0 个 tool，应被压缩
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read', arguments: '{"path":"b"}' } }] },
+      { role: 'tool', tool_call_id: 'c1', content: 'B'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c2', type: 'function', function: { name: 'read', arguments: '{"path":"c"}' } }] },
+      { role: 'tool', tool_call_id: 'c2', content: 'C'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c3', type: 'function', function: { name: 'read', arguments: '{"path":"d"}' } }] },
+      { role: 'tool', tool_call_id: 'c3', content: 'D'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c4', type: 'function', function: { name: 'read', arguments: '{"path":"e"}' } }] },
+      { role: 'tool', tool_call_id: 'c4', content: 'E'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c5', type: 'function', function: { name: 'read', arguments: '{"path":"f"}' } }] },
+      { role: 'tool', tool_call_id: 'c5', content: 'F'.repeat(200) },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c6', type: 'function', function: { name: 'read', arguments: '{"path":"g"}' } }] },
+      { role: 'tool', tool_call_id: 'c6', content: 'G'.repeat(200) },
     ];
     const budget = 60000;
-    assert.ok(estimateChars(msgs) > budget, '原始应超预算');
+    assert.ok(estimateMessagesTokens(msgs) > budget, `原始 token ${estimateMessagesTokens(msgs)} 应超预算 ${budget}`);
     const out = budgetMessages(msgs);
     assert.equal(out.length, msgs.length, '不得删除条目（配对完整性）');
     assert.ok(out[3].content.length < 5000 && out[3].content.includes('已折叠'), '旧 tool 应被压缩');
-    assert.equal(out[11].content.length, 200, '最近第 3 个 tool 保持全文');
-    assert.equal(out[13].content.length, 200, '最近 tool 保持全文');
+    assert.equal(out[5].content.length, 200, '最近第 6 个 tool 保持全文');
+    assert.equal(out[15].content.length, 200, '最近 tool 保持全文');
     assert.equal(out[0].content.length, 5000, 'system 不压缩');
     // 未超预算时原样返回
     const small = [{ role: 'system', content: 'x' }, { role: 'user', content: 'y' }];

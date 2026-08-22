@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.21';
+const APP_VERSION = '0.9.22';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -174,7 +174,34 @@ function persistInnerMessages() {
   catch (e) { console.log('[persist] 内层会话落盘失败:', e && e.message || e); } // 关键写失败必须可见
 }
 function clearInnerMessages() { innerMessages.length = 0; persistInnerMessages(); }
+// P12改进：新任务开始时清除旧记忆，防止旧任务记忆污染（v0.9.22）
+function clearWorkspaceMemory() {
+  try {
+    const shortPath = path.join(WS_DIR, '.memory-short.json');
+    if (fs.existsSync(shortPath)) {
+      fs.unlinkSync(shortPath);
+      console.log(`[记忆清理] 已清除工作区短期记忆: ${shortPath}`);
+    }
+  } catch { /* 清除失败不影响任务 */ }
+}
+// P14：崩溃后续航标记注入（v0.9.22）
+// 历史会话恢复后，在尾部注入续航天气标，让模型知道这是框架自动续航而非新用户新任务
+function injectRecoveryMarkIfNeeded() {
+  if (innerMessages.length === 0) return false;
+  // 检查是否已有 recovery 标记
+  const hasRecovery = innerMessages.some(m => m.content && m.content.includes('[框架提示] 本任务由框架自动续航'));
+  if (hasRecovery) return false;
+  // 检查最后一条是否是 assistant 回复（有历史痕迹）
+  const last = innerMessages[innerMessages.length - 1];
+  if (last && last.role === 'assistant' && last.content) {
+    innerMessages.push({ role: 'user', content: '[框架提示] 本任务由框架自动续航恢复，上下文已压缩保留最近历史。请根据当前上下文和 [任务清单]/[轮数预算] 注记继续执行，不要重复已完成步骤。' });
+    persistInnerMessages();
+    return true;
+  }
+  return false;
+}
 loadInnerMessages();
+injectRecoveryMarkIfNeeded();
 
 // ---------- 审批历史摘要（外层上下文用：最近 n 条批准/拒绝决定） ----------
 function recentAuditLines(n) {
@@ -685,18 +712,28 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
     milestoneWatch(name, args);
     return result;
   };
- try {
-   // 统一入口：任务级自动重入（v0.9.13）包裹 chatInner——withRetry 耗尽（断网/持续限流
-   // 超约 2 分钟）后 30s/60s/120s 退避重入续跑。重入安全：异常抛出点 messages 尾部
-   // 必为完整配对，模型看到尾部工具结果自然续跑，已完成步骤不重做
-   const runInner = () => chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
-     todoNote,
-     shouldContinue,
-     intentNote,
-     // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
-     onRound: () => persistInnerMessages()
-   });
+  // 任务级 wall-clock 超时（v0.9.22 P15）：防无限轮次耗 API 预算
+  const TASK_TIMEOUT_MS = Number(process.env.DUAL_AGENT_TASK_TIMEOUT_MS) || 1800000; // 默认 30 分钟
+  const taskStartTs = Date.now();
+  try {
+    // 统一入口：任务级自动重入（v0.9.13）包裹 chatInner——withRetry 耗尽（断网/持续限流
+    // 超约 2 分钟）后 30s/60s/120s 退避重入续跑。重入安全：异常抛出点 messages 尾部
+    // 必为完整配对，模型看到尾部工具结果自然续跑，已完成步骤不重做
+    const runInner = () => chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
+      todoNote,
+      shouldContinue,
+      intentNote,
+      // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
+      onRound: () => persistInnerMessages()
+    });
     let lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '内层任务' });
+    // P15 检查：超时则注入时间耗尽注记
+    if (Date.now() - taskStartTs > TASK_TIMEOUT_MS) {
+      send({ type: 'info', text: `[时间预警] 任务已运行 ${Math.round((Date.now() - taskStartTs) / 60000)} 分钟，超过 ${TASK_TIMEOUT_MS / 60000} 分钟限制` });
+      innerMessages.push({ role: 'user', content: '[框架提示] 任务运行时间已超限，请立即总结已有成果并停止新探索。基于现有证据输出最终结论。' });
+      persistInnerMessages();
+      lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '时间耗尽' });
+    }
    // 长文执行强制（v0.9.18 病根：实测 agnes-2.5-flash 收到创作纪律后仍"讲道理+反问"
    // 空谈一轮零工具调用——能力账本注入后概率降低但不归零，框架必须兜底）。检测：
    // 长文任务 + 全程零写入 → 注入行动令重入执行（P11 改进：允许最多 2 次，防一次失效全放弃）
@@ -1011,6 +1048,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/inner/reset' && req.method === 'POST') {
       if (innerLock) { json(res, 409, { success: false, error: '内层执行中，不能清空' }); return; }
       clearInnerMessages();
+      clearWorkspaceMemory(); // P12: 同时清除工作区记忆
       json(res, 200, { success: true });
       return;
     }
