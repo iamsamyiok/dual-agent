@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.17';
+const APP_VERSION = '0.9.18';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -464,13 +464,17 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
       }
       // 长文创作任务（v0.9.17 病根：模型以"万字超单次输出限制"为由直接拒绝——
       // 它没想到分章分段 write 工具流可以完成；自动续航 72 轮预算 + append 分段
-      // 写入足以支撑万字级产出）。注入创作纪律，并明确禁止拒绝
+      // 写入足以支撑万字级产出）。注入创作纪律，并明确禁止拒绝。
+      // v0.9.18 追加：实测 agnes-2.5-flash 收到纪律后仍会"讲道理+反问"（零工具调用
+      // 空谈一轮）——注入能力账本（把预算算给它看，堵死"轮数不够"的论证空间）+
+      // 自主决策令（禁止以提问/确认开局）
       if (isLongFormTask(message)) {
-        finalMsg = message + '\n\n[框架提示] 本任务为长文创作任务，你必须用工具流完成，禁止以"超出输出能力/篇幅过长"为由拒绝（单次输出不够就分多次写文件）。执行纪律：\n' +
+        finalMsg = message + '\n\n[框架提示] 本任务为长文创作任务，你必须用工具流完成，禁止以"超出输出能力/篇幅过长/轮数限制"为由拒绝或讨价还价。能力账本（算给你看）：框架轮数预算 72 轮（24 轮/段 × 3 段自动续航），每轮稳定输出 1000-1500 字符，万字只需 10-15 轮写入——预算绰绰有余，任何"单次输出上限"都不构成障碍。执行纪律：\n' +
           '1) 先规划章节：todo.add 每章一条（如"第一章 起势：冲突建立"），章节数按目标字数÷每章 600-800 字估算；\n' +
-          '2) 逐章写入文件：每章内部再分段——首次 write(path=文件名, content=本章第一段)，后续每段 write(同一路径, content=下一段, append=true)。每段 ≤1500 字符（API 流式传输对超大参数会截断，分段是硬要求，段与段不得重叠跳行）；\n' +
+          '2) 逐章写入文件：每章内部再分段——首次 write(path=文件名, content=本章第一段)，后续每段 write(同一路径, content=下一段, append=true)。每段 ≤1500 字符（API 流式传输对超大参数会截断，分段是硬要求，段与段不得重叠跳行）；append 的 content 必须以 \\n 开头（新起一段），章节标题（如 ## 第三章 xxx）必须独占一行，否则 markdown 渲染不出标题；\n' +
           '3) 每完成一章 todo.toggle 勾选，再写下一章；全部章节完成后 verify 断言（exists + line_count + contains 关键情节词）；\n' +
-          '4) 最后输出交付说明：文件路径 + 章节目录 + 总字数估计。中途上下文被折叠属正常现象（[轮数预算]/[任务清单] 注记会告诉你进度），照常续写。';
+          '4) 最后输出交付说明：文件路径 + 章节目录 + 总字数估计。中途上下文被折叠属正常现象（[轮数预算]/[任务清单] 注记会告诉你进度），照常续写；\n' +
+          '5) 自主决策：章节划分、情节走向、文件名等细节自行合理决定并立即执行，禁止以提问/确认/给方案开局——用户要的是写好的成品文件。仅当目标超过 3 万字时，可先交付完整的前 1/3 章节并在文件中注明续写点。';
         send({ type: 'info', text: '检测到长文创作任务，已注入分章分段创作纪律' });
       }
       // 拒绝后催促对齐（v0.9.17 病根：模型拒绝万字任务 → 用户"请你搞定" → 模型被
@@ -662,7 +666,12 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
      }
    } catch { /* 记忆失败不阻断任务 */ }
  };
+ // 长文执行强制的写入探针（v0.9.18）：callPluginWrapped 里置位，runInner 结束后检查
+ let wroteAny = false;
  const callPluginWrapped = async (name, args) => {
+   // 长文执行强制（v0.9.18）：记录本任务是否发生过真实写入（write/edit，或 bash 重定向/heredoc）
+   if (name === 'write' || name === 'edit') wroteAny = true;
+   else if (name === 'bash' && args && /(>>|>|<<|tee\s)/.test(String(args.command || ''))) wroteAny = true;
    const result = await callPlugin(name, args); // 先执行（toggle 落盘后再对比，否则读到旧状态）
    milestoneWatch(name, args);
    return result;
@@ -679,6 +688,15 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
      onRound: () => persistInnerMessages()
    });
    let lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '内层任务' });
+  // 长文执行强制（v0.9.18 病根：实测 agnes-2.5-flash 收到创作纪律后仍"讲道理+反问"
+  // 空谈一轮零工具调用——能力账本注入后概率降低但不归零，框架必须兜底）。检测：
+  // 长文任务 + 全程零写入 → 注入行动令重入执行一次（单发，不循环——防教条死磕）
+  if (isLongFormTask(message) && !wroteAny) {
+    send({ type: 'info', text: '长文任务零写入收场，注入行动令强制重入执行' });
+    innerMessages.push({ role: 'user', content: '[框架提示] 你上一条回复仍停留在解释/方案/提问，没有执行任何写入动作，这不是完成任务。现在必须立即开始执行：第一步 todo.add 建章节清单，第二步 write 写入第一章首段，之后逐段 append 直到完成。本条指令生效后禁止再输出任何解释或问题，第一条消息就必须是 todo.add 工具调用。' });
+    persistInnerMessages();
+    lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '长文强制执行' });
+  }
    // 交付核验 + 自动返修（v0.9.14）：对照意图契约核验（硬断言先行，语义缺口 judge 补），
    // 发现缺口注入返修指令重入执行，上限 2 轮（防完美主义死循环——v0.9.10 教训的反面）
    if (intent) {

@@ -1717,6 +1717,16 @@ async function main() {
     assert.ok(/restoreInnerQueue\(\);[\s\S]{0,200}setImmediate\(\(\) => \{ drainInnerQueue\(\)/.test(srv), '重启恢复队列后立即消化');
     assert.ok(/fromQueue/.test(srv) && /innerLock && !fromQueue/.test(srv), '队列消化跳过锁检查（防竞态窗口重新排队乱序）');
   });
+  await t('静态防回归：长文零写入强制重入接线（v0.9.18：注入是软约束，框架必须兜底）', () => {
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    const probeDef = srv.indexOf('let wroteAny = false');
+    const probeSet = srv.indexOf("name === 'write' || name === 'edit'") > 0 ? srv.indexOf('wroteAny = true', srv.indexOf("const callPluginWrapped")) : -1;
+    const enforce = srv.indexOf('isLongFormTask(message) && !wroteAny');
+    assert.ok(probeDef > 0 && probeSet > probeDef, '写入探针声明在 callPluginWrapped 之前且内部置位');
+    assert.ok(enforce > probeDef, '零写入强制重入在探针声明之后（否则永远 false）');
+    assert.ok(/长文强制执行/.test(srv), '重入带独立 label 便于日志追踪');
+  });
+
 
   // ===== 文档上传与查看（v0.9.16 e2e）=====
   await t('上传：base64 JSON → uploads 落盘 + 重名加序号 + 非法名拒绝', async () => {
