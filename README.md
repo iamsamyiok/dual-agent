@@ -3,6 +3,25 @@
 轻量演示：内层 Agent（OpenAI 兼容 API + 插件执行）+ 外层 Agent（本机 opencode CLI）自闭环。
 外层根据内层日志与插件状态提出插件增删改建议，经外层栏下方审批栏批准后自动快照、应用、热加载。
 
+## hwj 终端智能体（v0.9.28 新增）
+
+内层 Agent 完整能力的终端封装（类 opencode TUI 形态，零依赖）：双击即用、双模式、意图闭环。
+
+```
+Windows：双击 hwj.bat → 自动经 WSL 启动终端智能体
+macOS/Linux：双击 hwj.command（或在终端 ./hwj.command）
+
+终端内：
+> 创建文件 hello.txt 写入问候语        # 直接下任务：工具流执行 + 意图核验
+> /mode plan                          # 只读分析模式（拦截 write/edit）
+> /help                               # 全部 13 个命令
+```
+
+特性：与网页版共享 API 配置（`.data/config.json`）与任务域（记忆/技能/清单/过程留痕），
+会话独立落盘（`workspaces/<ws>/hwj-messages.json`）互不污染；任务中断（Ctrl+C）保留已完成轮次；
+支持排队（≤5 条）、多工作区（`--ws`）、会话导出、MOCK 演示（`DUAL_AGENT_MOCK=1`）。
+详细设计见主仓 `.monkeycode/specs/2026-08-22-hwj-terminal-agent/`。
+
 ## 快速开始
 
 ### Windows（一键启动）

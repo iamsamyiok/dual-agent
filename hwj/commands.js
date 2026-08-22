@@ -1,0 +1,186 @@
+// hwj 斜杠命令系统 — 不退出 TUI 完成配置/模式/工作区/导出等常用操作
+const fs = require('fs');
+const path = require('path');
+const core = require('./core');
+
+const HELP = [
+  '/help              显示本帮助',
+  '/config            内层 API 配置向导（base_url / api_key / model，回车保留旧值）',
+  '/mode build|plan   切换执行模式（plan=只读分析，拦截 write/edit）',
+  '/model             查看当前模型与 profiles；/model <序号> 切换 profile',
+  '/workspace [名称]  列出/切换工作区（会话与记忆随工作区隔离）',
+  '/reset             清空当前会话并清除意图契约',
+  '/history           会话条数摘要与最近消息预览',
+  '/usage             token 用量统计（本会话累计 + 历史分组）',
+  '/memory [关键词]   检索工作区记忆',
+  '/todo              查看任务清单',
+  '/export [文件名]   导出当前会话为 Markdown（默认 hwj-export-<时间>.md）',
+  '/clear             清屏（保留会话）',
+  '/exit              保存会话并退出'
+];
+
+// 交互式输入（TUI 模式用 readline 临时接管；plain 模式读 stdin 行）
+function makePrompter(ui) {
+  // TUI 模式下 readline 已被主循环持有，命令向导用简单的 question 接管：暂停主 rl → 逐项问 → 恢复
+  return async function ask(question, defval) {
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const shown = defval ? `${question} [${defval}]: ` : `${question}: `;
+      return await new Promise(resolve => {
+        rl.question(shown, ans => resolve(String(ans || '').trim() || (defval || '')));
+      });
+    } finally { rl.close(); }
+  };
+}
+
+// 执行命令；返回 'exit' 表示退出请求，'handled' 表示已处理，'unknown' 未知命令
+async function runCommand(line, ctx) {
+  const ui = ctx.ui; // { printInfo, printError, printPlain, printUser, printAssistant }
+  const parts = line.trim().split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const arg = parts.slice(1).join(' ');
+  const plugins = require('../lib/plugins');
+
+  switch (cmd) {
+    case '/help':
+      HELP.forEach(l => ui.printPlain(l));
+      return 'handled';
+
+    case '/config': {
+      const cfg = core.getConfig();
+      const ask = makePrompter(ui);
+      ui.printPlain('内层 API 配置向导（直接回车保留当前值，api_key 输入显示明文请注意周围环境）');
+      const base_url = await ask('Base URL（OpenAI 兼容，如 https://api.agnes-ai.cn/v1）', cfg.inner.base_url);
+      const api_key = await ask('API Key', cfg.inner.api_key ? cfg.inner.api_key : '');
+      const model = await ask('模型名（如 agnes-2.5-flash）', cfg.inner.model);
+      try {
+        core.saveInnerConfig({ base_url, api_key, model });
+        ui.printInfo('配置已保存（与网页版共享 .data/config.json）');
+      } catch (e) { ui.printError('保存失败：' + (e && e.message || e)); }
+      return 'handled';
+    }
+
+    case '/mode': {
+      const m = String(arg || '').toLowerCase();
+      if (m === 'build' || m === 'plan') {
+        const st = core.hwjState(); st.mode = m; core.saveHwjState(st);
+        ctx.onModeChange(m);
+        ui.printInfo(`已切换为 ${m} 模式${m === 'plan' ? '（write/edit 已拦截，探索零风险）' : '（全插件可用）'}`);
+      } else {
+        ui.printPlain(`当前模式：${core.hwjState().mode}。用法：/mode build 或 /mode plan`);
+      }
+      return 'handled';
+    }
+
+    case '/model': {
+      const cfg = core.getConfig();
+      const { validProfiles } = require('../lib/profiles');
+      const profiles = validProfiles(cfg);
+      ui.printPlain(`当前模型：${cfg.inner.model || '（未配置）'} @ ${cfg.inner.base_url || '（未配置）'}`);
+      if (profiles.length) {
+        ui.printPlain('profiles 轮转清单（子智能体自动分摊，主配置恒为首位）：');
+        profiles.forEach((p, i) => ui.printPlain(`  ${i + 1}. ${p.name}: ${p.cfg.model}`));
+        ui.printPlain('主配置由 /config 修改；profiles 编辑请用网页版设置面板');
+      } else {
+        ui.printPlain('（未配置 profiles，子智能体统一走主配置）');
+      }
+      return 'handled';
+    }
+
+    case '/workspace': {
+      if (!arg) {
+        const list = core.listWorkspaces();
+        const cur = core.hwjState().ws;
+        ui.printPlain(`工作区（当前：${cur}）：${list.join('  ')}`);
+        ui.printPlain('切换：/workspace <名称>（小写字母数字连字符，会话与记忆随工作区隔离）');
+        return 'handled';
+      }
+      if (!/^[a-z0-9-]{1,40}$/.test(arg)) { ui.printError('工作区名非法：仅小写字母/数字/连字符，≤40 字符'); return 'handled'; }
+      const st = core.hwjState(); st.ws = arg; core.saveHwjState(st);
+      core.wsDir(arg);
+      ctx.onWorkspaceChange(arg);
+      const sess = core.loadSession(arg);
+      ui.printInfo(`已切换到工作区 ${arg}（会话 ${sess.corrupted ? '损坏已重开' : sess.length + ' 条消息'}，记忆/技能/任务清单随区隔离）`);
+      return 'handled';
+    }
+
+    case '/reset': {
+      core.clearSession(ctx.ws);
+      try { await plugins.runPlugin('intent', { action: 'clear' }, { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR, config: core.CONFIG_PATH }); } catch { /* ignore */ }
+      ctx.onReset();
+      ui.printInfo('会话已清空，意图契约已清除，系统提示已重建');
+      return 'handled';
+    }
+
+    case '/history': {
+      const sess = core.loadSession(ctx.ws);
+      const userN = sess.filter(m => m.role === 'user').length;
+      const asstN = sess.filter(m => m.role === 'assistant').length;
+      ui.printPlain(`当前会话：${sess.length} 条消息（user ${userN} / assistant ${asstN}）`);
+      for (const m of sess.slice(-6)) {
+        const tag = m.role === 'user' ? '你  ' : m.role === 'assistant' ? 'hwj ' : ` ${m.role} `;
+        const text = String(m.content || '').replace(/\s+/g, ' ').slice(0, 80);
+        ui.printPlain(`  ${tag}${text}`);
+      }
+      return 'handled';
+    }
+
+    case '/usage': {
+      try {
+        const out = await plugins.runPlugin('usage', { action: 'history' }, { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR });
+        ui.printPlain(String(out));
+      } catch (e) { ui.printError('用量查询失败：' + (e && e.message || e)); }
+      return 'handled';
+    }
+
+    case '/memory': {
+      try {
+        const out = await plugins.runPlugin('memory', { action: 'search', query: arg || '' }, { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR });
+        ui.printPlain(String(out));
+      } catch (e) { ui.printError('记忆检索失败：' + (e && e.message || e)); }
+      return 'handled';
+    }
+
+    case '/todo': {
+      try {
+        const out = await plugins.runPlugin('todo', { action: 'list' }, { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR });
+        ui.printPlain(String(out));
+      } catch (e) { ui.printError('清单读取失败：' + (e && e.message || e)); }
+      return 'handled';
+    }
+
+    case '/export': {
+      const sess = core.loadSession(ctx.ws);
+      const name = arg || `hwj-export-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.md`;
+      const safe = path.basename(name).replace(/[^a-zA-Z0-9._\u4e00-\u9fa5-]/g, '_');
+      const lines = [`# hwj 会话导出（工作区：${ctx.ws}）`, `> 导出时间：${new Date().toLocaleString()}`, `> 消息数：${sess.length}`, ''];
+      for (const m of sess) {
+        if (m.role === 'system') continue;
+        if (m.role === 'user') lines.push(`## 你`, '', String(m.content || ''), '');
+        else if (m.role === 'assistant') lines.push(`## hwj`, '', String(m.content || ''), '');
+        else if (m.role === 'tool') lines.push('```', String(m.content || '').slice(0, 500), '```', '');
+      }
+      try {
+        const fp = path.join(core.wsDir(ctx.ws), safe);
+        fs.writeFileSync(fp, lines.join('\n'));
+        ui.printInfo(`已导出：${fp}`);
+      } catch (e) { ui.printError('导出失败：' + (e && e.message || e)); }
+      return 'handled';
+    }
+
+    case '/clear':
+      process.stdout.write('\x1b[2J\x1b[H');
+      return 'handled';
+
+    case '/exit':
+      return 'exit';
+
+    default:
+      ui.printError(`未知命令：${cmd}，输入 /help 查看全部命令`);
+      return 'unknown';
+  }
+}
+
+function isCommand(line) { return /^\s*\//.test(String(line || '')); }
+
+module.exports = { runCommand, isCommand, HELP };
