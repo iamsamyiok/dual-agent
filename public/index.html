@@ -370,7 +370,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.9.19';
+const PAGE_VERSION = '0.9.20';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -755,7 +755,8 @@ async function innerSend() {
         const k = n => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n || 0));
         const b = $('tokBadge');
         b.style.display = 'inline';
-        b.textContent = `⚡ ${(ev.est ? '~' : '') + k(t.prompt)}+${k(t.completion)} tok` + (t.calls > 1 ? ` / ${t.calls} 次` : '');
+        b.title = `本次调用：prompt ${t.prompt} tok，completion ${t.completion} tok，累计 ${t.calls} 次`;
+        b.textContent = `⚡ ${(ev.est ? '~' : '') + k(t.prompt)}+${k(t.completion)} tok · ${t.calls} 次调用`;
       }
       else if (ev.type === 'info') { appendMsg('innerMsgs', 'assistant', '⏳ ' + ev.text, '系统'); }
       else if (ev.type === 'queued') { appendMsg('innerMsgs', 'assistant', '🕒 ' + ev.text, '系统'); }
