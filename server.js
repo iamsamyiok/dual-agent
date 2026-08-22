@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.14';
+const APP_VERSION = '0.9.15';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -273,6 +273,55 @@ const INNER_SYSTEM_PROMPT_BASE = [
   '4. 如果学到了新信息，调用 memory.save(level="long", ...) 保存到长期记忆'
 ].join('\n');
 
+// ---------- 内层消息队列（v0.9.15 病根：409 直接丢用户消息） ----------
+// 执行中的用户消息入队（内存 + 落盘 dataDir/inner-queue.json，重启不丢），
+// 当前任务 finally 时消化队首：mock req/res 复用 handleInnerChat，结果正常落盘
+// （process.md / inner-messages.json），前端经 /api/process 轮询或刷新可见
+const INNER_QUEUE_MAX = 5;
+let innerQueue = [];
+function queuePath() { return path.join(DATA_DIR, 'inner-queue.json'); }
+function restoreInnerQueue() {
+  try {
+    const q = JSON.parse(fs.readFileSync(queuePath(), 'utf8'));
+    if (Array.isArray(q)) innerQueue = q.filter(x => typeof x === 'string' && x.trim()).slice(0, INNER_QUEUE_MAX);
+  } catch { /* 无文件 */ }
+}
+function persistInnerQueue() {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(queuePath(), JSON.stringify(innerQueue, null, 1), 'utf8'); } catch { /* 落盘失败不阻断 */ }
+}
+// mock req/res：handleInnerChat 全链路复用（readBody 由 preBody 绕过；SSE send 全部静默丢弃）。
+// res.end() 必须触发 close 处理器——sse() 的心跳 interval 靠 req/res close 事件清理，
+// mock 对象不发事件会导致 interval 泄漏
+function mockReqRes() {
+  const handlers = {};
+  const req = { on: () => {}, url: '/api/inner/chat', method: 'POST' };
+  const res = {
+    writeHead: () => {},
+    write: () => {},
+    end: () => { (handlers.close || []).forEach(f => { try { f(); } catch { /* ignore */ } }); },
+    on: (ev, fn) => { (handlers[ev] = handlers[ev] || []).push(fn); }
+  };
+  return { req, res };
+}
+let draining = false;
+async function drainInnerQueue() {
+  if (draining || !innerQueue.length) return;
+  // API 未配置（真实模式）时暂不消化——消息留在盘上，配置就绪后的下一轮 drain 执行
+  const _cfg = getConfig();
+  if (process.env.DUAL_AGENT_MOCK !== '1' && !(_cfg.inner.base_url && _cfg.inner.api_key && _cfg.inner.model)) return;
+  draining = true;
+  try {
+    while (innerQueue.length) {
+      const message = innerQueue.shift();
+      persistInnerQueue();
+      const { req, res } = mockReqRes();
+      // fromQueue=true：跳过锁检查直接执行（刚释放的锁归队首所有；HTTP 新请求此间
+      // 进来会正常排队，不与本轮消化抢锁）
+      try { await handleInnerChat(req, res, { message }, true); } catch { /* 单条失败继续消化 */ }
+    }
+  } finally { draining = false; }
+}
+
 // 执行互斥：同一时刻只允许一路内层 / 一路外层（防止并发 SSE 交叉写坏会话状态）
 let innerLock = false;
 let outerLock = false;
@@ -285,6 +334,9 @@ const AUTOSTOP = process.env.DUAL_AGENT_AUTOSTOP !== '0';
 const IDLE_MS = Number(process.env.DUAL_AGENT_IDLE_MS) > 0 ? Number(process.env.DUAL_AGENT_IDLE_MS) : 60000;
 const BYE_GRACE_MS = Number(process.env.DUAL_AGENT_BYE_GRACE_MS) > 0 ? Number(process.env.DUAL_AGENT_BYE_GRACE_MS) : 25000; // bye 后宽限：默认大于前端轮询间隔 20s，多标签页时另一页的轮询会续命
 // 首次运行（未配置内层 API 且非演示模式）多给 4 分钟配置时间，避免向导没填完就被退出
+restoreInnerQueue();
+// 重启恢复的队列消息立即消化（不等下一次任务 finally——否则恢复的队首要躺到用户再发消息才执行）
+setImmediate(() => { drainInnerQueue().catch(() => { /* 启动消化失败不阻断服务 */ }); });
 const _cfg0 = getConfig();
 let lastSeen = Date.now() + (!(_cfg0.inner.base_url && _cfg0.inner.api_key && _cfg0.inner.model) && process.env.DUAL_AGENT_MOCK !== '1' ? 4 * 60000 : 0);
 setInterval(() => {
@@ -294,6 +346,317 @@ setInterval(() => {
     process.exit(0);
   }
 }, 5000);
+
+// ---------- 内层任务处理（v0.9.15 从路由 inline 块抽出为函数） ----------
+// preBody：队列消化时已解析的请求体（跳过 readBody，配 mock req）
+// fromQueue：队列消化调用——跳过锁检查（刚释放的锁归队首所有）
+async function handleInnerChat(req, res, preBody, fromQueue) {
+ const body = preBody !== undefined ? preBody : await readBody(req);
+ const message = String(body.message || '').trim();
+ if (!message) { json(res, 400, { success: false, error: '消息为空' }); return; }
+ if (innerLock && !fromQueue) {
+     // v0.9.15 病根：执行中的用户消息被 409 直接丢弃——用户输入无声消失，界面上
+     // 旧任务的回复还会渲染到新消息下方造成"答非所问"错觉。修复：消息入队（上限 5），
+     // 当前任务完成后自动执行；SSE 返回 queued 事件让前端显示排队状态
+     if (innerQueue.length >= INNER_QUEUE_MAX) { json(res, 409, { success: false, error: '排队消息已达上限（5 条），请稍候' }); return; }
+     innerQueue.push(message);
+     persistInnerQueue();
+     const qsend = sse(req, res);
+     qsend({ type: 'queued', text: `内层正在执行上一条任务，本消息已排队（第 ${innerQueue.length} 位），完成后自动执行`, position: innerQueue.length });
+     qsend({ type: 'done' });
+     try { res.end(); } catch { /* closed */ }
+     return;
+   }
+ const cfg = getConfig();
+ if (process.env.DUAL_AGENT_MOCK !== '1' && !(cfg.inner.base_url && cfg.inner.api_key && cfg.inner.model)) {
+   json(res, 400, { success: false, error: '内层 API 未配置：点右上角「配置」填写 base_url / api_key / model' });
+   return;
+ }
+ innerLock = true;
+      // 测试钩子：DUAL_AGENT_TEST_HOLD=ms 让任务在此停住，供 e2e 验证排队时序（生产不设即零开销）
+      if (process.env.DUAL_AGENT_TEST_HOLD) await new Promise(r => setTimeout(r, Number(process.env.DUAL_AGENT_TEST_HOLD)));
+ const send = sse(req, res);
+ send({ type: 'start' });
+ const WS_DIR = workspaceDir();
+ // 过程记录：任务头 + 待落盘的中间回复（text 快照式，工具调用前 flush 避免重复）
+ appendProcess(`\n---\n\n## ${fmtClock(Date.now())} 📋 任务\n\n${message}\n`);
+ let pendingText = '';
+ const flushText = () => {
+   if (pendingText.trim()) appendProcess(`\n### ${fmtClock(Date.now())} 💬 内层\n\n${pendingText.trim()}\n`);
+   pendingText = '';
+ };
+ // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）
+ // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）；每次重建注入当天日期
+ if (innerMessages[0] && innerMessages[0].role === 'system') innerMessages[0].content = buildInnerSystemPrompt();
+ else innerMessages.unshift({ role: 'system', content: buildInnerSystemPrompt() });
+ // 多步任务检测 → 注入 todo 提醒到 user 消息尾部（实测 agnes-2.5-flash 无视 system 程序指令，
+ // 但对紧邻任务文本遵循度高；注入落盘，历史中形成使用示范）
+ let finalMsg = message;
+ const multiStep = isMultiStepTask(message);
+ if (multiStep) {
+   finalMsg = message + '\n\n[框架提示] 本任务为多步任务，两项纪律：\n1) 开始执行前必须先用 todo 建任务清单（每个步骤一条 todo.add），每完成一步立即 todo.toggle(id=...)，全部完成时清单应全为 [x]。\n2) 收尾前必须用 verify 插件断言每个产出文件（exists + contains 内容特征 + line_count），看到 FAIL 先修复再重验，全 PASS 才能总结。';
+   send({ type: 'info', text: '检测到多步任务，已注入任务清单+产出验证提醒' });
+ }
+ // 意图契约抽取（v0.9.14 病根：长任务后段上下文折叠把任务原文埋进历史 → 交付漏项。
+ // todo 治步骤执行，意图契约治要求覆盖）。仅多步任务 + 真实模式启用（DUAL_AGENT_INTENT=0 关闭）；
+ // 抽取失败优雅降级返回 null，任务照常执行；换任务时旧契约必须清除（防过期要求污染后续任务）
+ const intentPath = path.join(WS_DIR, '.intent.json');
+ let intent = null;
+ if (process.env.DUAL_AGENT_MOCK !== '1' && multiStep && process.env.DUAL_AGENT_INTENT !== '0') {
+   send({ type: 'info', text: '多步任务：抽取意图契约（目标 / 交付物 / 验收条款）' });
+   intent = await extractIntent(cfg.inner, message, { onEvent: send });
+   if (intent) {
+     try { fs.writeFileSync(intentPath, JSON.stringify(intent, null, 1), 'utf8'); } catch { /* 落盘失败不阻断 */ }
+     send({ type: 'info', text: `意图契约已建立：交付物 ${intent.deliverables.length} 项 / 验收条款 ${intent.acceptance.length} 条（工作区 .intent.json）` });
+   } else {
+     try { fs.unlinkSync(intentPath); } catch { /* 本无旧文件 */ }
+     send({ type: 'info', text: '意图抽取失败，跳过意图闭环（任务照常执行）' });
+   }
+ } else {
+   try { fs.unlinkSync(intentPath); } catch { /* 清除上一任务的过期契约 */ }
+ }
+ // 意图注记：每轮读最新契约注入发送副本（复用 todoNote 模式，落盘干净）
+ const intentNote = () => {
+   try { return formatIntentNote(JSON.parse(fs.readFileSync(intentPath, 'utf8'))); } catch { return ''; }
+ };
+ innerMessages.push({ role: 'user', content: finalMsg });
+ persistInnerMessages();
+ // 事件处理器（主/子智能体共用）：过程落盘 + usage 落账 + SSE 透传（子事件带 sub 标记）
+ const handleEvent = (ev) => {
+   if (ev.type === 'text' && !ev.sub) pendingText = ev.text;
+   else if (ev.type === 'tool_call') {
+     flushText();
+     let pretty = '';
+     try { pretty = JSON.stringify(ev.args, null, 2); } catch { pretty = String(ev.args); }
+     appendProcess(`\n### ${fmtClock(Date.now())} 🔧 ${ev.sub ? '[子] ' : ''}${ev.plugin}\n\n**入参**\n\n\`\`\`json\n${pretty}\n\`\`\`\n`);
+   } else if (ev.type === 'tool_result') {
+     appendProcess(`**结果** ${ev.ok ? '✓' : '✗'}（${ev.ms}ms）${ev.sub ? ' [子智能体]' : ''}\n\n\`\`\`\n${String(ev.result).slice(0, 2000)}\n\`\`\`\n`);
+   } else if (ev.type === 'info') {
+     flushText();
+     appendProcess(`\n### ${fmtClock(Date.now())} ⏳ ${String(ev.text || '')}\n`);
+   } else if (ev.type === 'usage') {
+     // token 计量落盘：逐轮追加（当轮量 + 会话累计），usage 插件与审计由此取数；子智能体标记 sub
+     try {
+       const uf = path.join(WS_DIR, 'inner-usage.json');
+       let rows = [];
+       try { rows = JSON.parse(fs.readFileSync(uf, 'utf8')); } catch { /* 首次 */ }
+       if (!Array.isArray(rows)) rows = [];
+       rows.push({ ts: Date.now(), prompt: ev.last.prompt, completion: ev.last.completion, cached: ev.last.cached, est: !!ev.est, sub: !!ev.sub, profile: ev.tag || 'main',
+         totalsPrompt: ev.totals.prompt, totalsCompletion: ev.totals.completion, totalsCalls: ev.totals.calls });
+       fs.writeFileSync(uf, JSON.stringify(rows, null, 1), 'utf8');
+     } catch { /* 计量落盘失败不阻断会话 */ }
+       appendProcess(`\n> 📊 token${ev.sub ? `（子智能体${ev.tag ? '@' + ev.tag : ''}）` : ''}（第 ${ev.totals.calls} 次调用${ev.est ? '，估算' : '，API 真实返回'}）：prompt ${ev.last.prompt} + 输出 ${ev.last.completion}；会话累计 prompt ${ev.totals.prompt} + 输出 ${ev.totals.completion}\n`);
+   } else if (ev.type === 'error') {
+     flushText();
+     appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);
+   }
+   send(ev);
+ };
+ // 子智能体派生（对标 Claude Code Task）：独立 messages 跑完整工具循环（8 轮上限），
+ // 探索过程隔离在子上下文，主上下文只收结论。子级 ctx 不带 spawnSub → 无法再派生（深度 1）。
+ // 多路 API（v0.9.6）：子任务轮转选择 inner_profiles 里的配置，并行请求分摊到不同端点，
+ // 避免同一 LLM API 的并发速率限制；未配置 profiles 时回退主配置（行为与旧版一致）。
+ // 限流韧性（v0.9.7）：轮次级 withRetry 短退避（1.5s 序列，主会话的一半——子任务轻量，
+ // 快速把结果交回主会话决策优于长等）；轮次重试耗尽后任务级 failover：换下一路 profile
+ // 从头重跑一次（无多路配置时直接失败），限流不再死磕单端点
+ const SUB_MAX_ROUNDS = 8;
+ const SUB_RETRY_BASE_MS = 1500;
+ const SUB_RR = { n: 0 }; // 轮转计数器：跨子任务递增，均匀分摊
+ const SUB_SYSTEM_BASE = [
+   '你是子智能体，负责独立完成一个调研/探索型子任务并返回结论。',
+   '规则：1) 直接执行，不要建 todo 清单；2) 结论必须自包含（数字/路径/关键原文），主会话看不到你的中间过程；',
+   '3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件；4) 结论 ≤300 字，先给结果再给一句依据；',
+   '5) 你的默认工作目录是 Agent 工作区（通常只有日志文件）。调研目标文件不存在时，先用 bash pwd/ls 定位实际路径',
+   '（项目源码常在仓库根，如 /workspace/dual-agent），用绝对路径访问，禁止一击不中就宣称"文件不存在"。'
+ ].join('\n');
+ // 可写版提示（v0.9.12 P1-6）：长任务的独立产出型子任务（改互不相同的文件）可委托子级并行写
+ const SUB_SYSTEM_WRITABLE = SUB_SYSTEM_BASE
+   .replace('负责独立完成一个调研/探索型子任务并返回结论', '负责独立完成一个产出型子任务（含写文件）并返回执行结果')
+   .replace('3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件', '3) 本任务授权写文件：用 write/edit 产出目标文件，写完必须 read 回验关键内容后才算完成')
+   + '\n6) 只写子任务指定的目标路径，禁止改动其他文件；产出后结论里报告写入路径与行数。';
+ const isTransientErr = e => !!(e && (e.retryable || (e.code && NET_CODES.test(e.code))));
+ // 病根教训（v0.9.7 压测抓出）：runSubOnce 独立函数，description 必须显式传参——
+ // 闭包只共享模块级变量，外层 spawnSub 的参数不在其作用域内（当时 ReferenceError 致 4 路全灭）
+ // writable（v0.9.12 P1-6）：执行层硬拦截——false 时子级 write/edit 调用直接拒绝（系统提示约束之外的保险丝）
+ const runSubOnce = async (picked, description, writable) => {
+   const subMessages = [
+     { role: 'system', content: writable ? SUB_SYSTEM_WRITABLE : SUB_SYSTEM_BASE },
+     { role: 'user', content: String(description) }
+   ];
+   const subCallPlugin = async (name, args) => {
+     if (!writable && (name === 'write' || name === 'edit')) {
+       const msg = `插件 ${name} 调用被拒绝：本子任务为只读探索型（未声明 writable），禁止写文件。如需产出文件，在结论中说明方案由主会话执行。`;
+       appendInnerLog({ ts: Date.now(), plugin: name, args, ok: false, result: msg.slice(0, 400), ms: 0, sub: true, profile: picked.name });
+       return msg;
+     }
+     const t0 = Date.now();
+     const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR }); // 无 spawnSub：子级禁止嵌套
+     appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0, sub: true, profile: picked.name });
+     return result;
+   };
+   const { chatInnerReal } = require('./lib/inner');
+   return await chatInnerReal(picked.cfg, subMessages, plugins.toolDefs(), subCallPlugin,
+     ev => handleEvent({ ...ev, sub: true, tag: ev.type === 'usage' ? picked.name : ev.tag }),
+     { maxRounds: SUB_MAX_ROUNDS, tag: picked.name, retryBaseMs: SUB_RETRY_BASE_MS });
+ };
+ const spawnSub = async (description, writable) => {
+   const picked = pickProfile(cfg, SUB_RR);
+   try {
+     return await runSubOnce(picked, description, writable);
+   } catch (e) {
+     if (!isTransientErr(e)) throw e; // 非限流/网络类错误（如 401 配置错）不换路重跑
+     const fallback = pickProfile(cfg, SUB_RR); // 换下一路（轮转计数器已前进）
+     if (fallback.name === picked.name) throw e; // 无其他路可换
+     handleEvent({ type: 'info', text: `子任务@${picked.name} 限流重试耗尽，failover 换路 @${fallback.name} 重跑` });
+     return await runSubOnce(fallback, description, writable);
+   }
+ };
+ // 搜索循环止损（v0.9.9 病根：真实调研会话 20 次同质搜索零有效结果，烧 183k prompt）：
+ // search 返回文本头部带「相关性 X.XX」，连续 <0.3 计数递增、达标清零；
+ // ≥3 次时在结果尾部注入强制策略升级指令（fetch 信源/换英文/subagent），打断重复模式
+ let lowSearchStreak = 0;
+ const callPlugin = async (name, args) => {
+   const t0 = Date.now();
+   const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR, spawnSub });
+   let final = result;
+   if (name === 'search') {
+     const m = /相关性 ([0-9.]+)/.exec(String(result));
+     if (m) {
+       if (Number(m[1]) < 0.3) lowSearchStreak += 1; else lowSearchStreak = 0;
+       if (lowSearchStreak >= 3) {
+         final = result + `\n\n[止损提醒] 已连续 ${lowSearchStreak} 次低质量搜索——继续换关键词重搜大概率重复失败。` +
+           `必须换策略：A) fetch 打开本次最相关结果的页面读正文；B) 换英文关键词；C) 直取权威信源（官方博客/行业报告）；` +
+           `D) 多信源调研改用 subagent 派生。禁止再执行第 ${lowSearchStreak + 1} 次同模式 search。`;
+         lowSearchStreak = 0; // 提醒一次后重置，避免每条都带
+       }
+     }
+   }
+   appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0 });
+   return final;
+ };
+ // 动态清单注记：每轮 API 调用前取最新 todo 状态注入发送副本（落盘干净）——
+ // 对标 Claude Code TodoList 的「执行中可见」，模型无需 todo.list 也能对齐进度、发现偏差即修订
+ const readTodo = () => {
+   try {
+     const arr = JSON.parse(fs.readFileSync(path.join(WS_DIR, '.todo.json'), 'utf8'));
+     return Array.isArray(arr) ? arr : [];
+   } catch { return []; }
+ };
+ const todoNote = () => {
+   const arr = readTodo();
+   if (!arr.length) return '';
+   const open = arr.filter(t => !t.done);
+   const done = arr.filter(t => t.done);
+   const lines = ['[任务清单] 当前进度（执行中发现计划不适用必须修订：todo.add 加步骤/调整后再继续）：'];
+   for (const t of open) lines.push(`- [ ] #${t.id} ${t.text}`);
+   const recentDone = done.slice(-3);
+   for (const t of recentDone) lines.push(`- [x] #${t.id} ${t.text}`);
+   if (done.length > recentDone.length) lines.push(`- （另有 ${done.length - recentDone.length} 项已完成略）`);
+   return lines.join('\n');
+ };
+ // 自动续航判定（v0.9.12 P0-3）：清单存在且有未完成项 → 撞段上限时值得续航
+ const shouldContinue = () => readTodo().some(t => !t.done);
+ // 里程碑记忆（v0.9.12 P1-4）：todo.toggle 把一项从待办变为完成时自动 memory.save
+ // 进度摘要——长任务后段上下文被预算折叠时，早期决策依据可从记忆召回。
+ // 病根：memory.save 全靠模型自觉，实测长任务后段"忘了自己为什么这么做"
+ let prevDoneIds = new Set(readTodo().filter(t => t.done).map(t => t.id));
+ const milestoneWatch = (name, args) => {
+   if (name !== 'todo' || !args || String(args.action) !== 'toggle') return;
+   try {
+     const arr = readTodo();
+     const nowDone = arr.filter(t => t.done);
+     const fresh = nowDone.filter(t => !prevDoneIds.has(t.id));
+     prevDoneIds = new Set(nowDone.map(t => t.id));
+     for (const t of fresh) {
+       plugins.runPlugin('memory', {
+         action: 'save', level: 'short',
+         content: `里程碑完成：#${t.id} ${t.text}（剩余 ${arr.filter(x => !x.done).length} 项未完成）`,
+         tags: ['进度']
+       }, { cwd: WS_DIR, dataDir: DATA_DIR }).catch(() => {});
+     }
+   } catch { /* 记忆失败不阻断任务 */ }
+ };
+ const callPluginWrapped = async (name, args) => {
+   const result = await callPlugin(name, args); // 先执行（toggle 落盘后再对比，否则读到旧状态）
+   milestoneWatch(name, args);
+   return result;
+ };
+ try {
+   // 统一入口：任务级自动重入（v0.9.13）包裹 chatInner——withRetry 耗尽（断网/持续限流
+   // 超约 2 分钟）后 30s/60s/120s 退避重入续跑。重入安全：异常抛出点 messages 尾部
+   // 必为完整配对，模型看到尾部工具结果自然续跑，已完成步骤不重做
+   const runInner = () => chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
+     todoNote,
+     shouldContinue,
+     intentNote,
+     // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
+     onRound: () => persistInnerMessages()
+   });
+   let lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '内层任务' });
+   // 交付核验 + 自动返修（v0.9.14）：对照意图契约核验（硬断言先行，语义缺口 judge 补），
+   // 发现缺口注入返修指令重入执行，上限 2 轮（防完美主义死循环——v0.9.10 教训的反面）
+   if (intent) {
+     const collectGaps = async () => {
+       const gaps = [];
+       const hardLines = [];
+       // 硬断言：文件类交付物 exists / json_valid（框架判定，零 token）
+       for (const va of buildVerifyArgs(intent)) {
+         try {
+           const r = String(await plugins.runPlugin('verify', va, { cwd: WS_DIR, dataDir: DATA_DIR }));
+           hardLines.push(`${va.path}：${r.split('\n')[0].slice(0, 120)}`);
+           if (/FAIL/.test(r)) gaps.push(`交付文件未达标（硬断言 FAIL）：${va.path}`);
+         } catch (e) {
+           hardLines.push(`${va.path}：断言异常`);
+           gaps.push(`交付文件无法核验：${va.path}——${String((e && e.message) || e).slice(0, 120)}`);
+         }
+       }
+       // LLM judge：核验语义覆盖（明确的问题是否回答、要求的维度是否齐全）。
+       // 只在硬断言干净时跑（已失败时返修必然发生，省一次调用）；judge 失败按无缺口处理
+       if (!gaps.length) {
+         try {
+           const verdictText = await callLLMText(cfg.inner, [
+             { role: 'system', content: '你是交付核验裁判，只输出 JSON。' },
+             { role: 'user', content: buildJudgePrompt(intent, lastAnswer, hardLines) }
+           ], { maxTokens: 500, onEvent: send, label: '交付核验' });
+           gaps.push(...parseVerdict(verdictText).gaps);
+         } catch { /* judge 通道故障按通过处理 */ }
+       }
+       return gaps;
+     };
+     const MAX_REPAIR = 2;
+     for (let r = 0; ; r++) {
+       const gaps = await collectGaps();
+       appendProcess(`\n### ${fmtClock(Date.now())} ✅ 交付核验（第 ${r + 1} 次）\n\n${gaps.length ? gaps.map((g, i) => `${i + 1}. ${g}`).join('\n') : 'PASS：意图契约全部条款满足'}\n`);
+       if (!gaps.length) {
+         send({ type: 'info', text: '[交付核验] PASS：交付满足意图契约全部条款' });
+         break;
+       }
+       if (r >= MAX_REPAIR) {
+         send({ type: 'info', text: `[交付核验] 返修上限（${MAX_REPAIR} 轮）已到，仍有 ${gaps.length} 项缺口，带缺口标注交付` });
+         lastAnswer = `${lastAnswer}\n\n[交付核验缺口标注] 以下要求经 ${MAX_REPAIR + 1} 次核验仍未满足：\n${gaps.map((g, i) => `${i + 1}. ${g}`).join('\n')}`;
+         break;
+       }
+       const repairMsg = `[交付核验] 对照意图契约发现以下未满足项：\n${gaps.map((g, i) => `${i + 1}. ${g}`).join('\n')}\n请立即针对性修复上述缺口（已满足的项不要重做），完成后重新交付总结。`;
+       innerMessages.push({ role: 'user', content: repairMsg });
+       persistInnerMessages();
+       send({ type: 'info', text: `[交付核验] 发现 ${gaps.length} 项缺口，自动返修（第 ${r + 1}/${MAX_REPAIR} 轮）` });
+       lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '返修任务' });
+     }
+   }
+   flushText();
+   persistInnerMessages();
+   send({ type: 'done' });
+ } catch (e) {
+   appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String((e && e.message) || e)}\n`);
+   send({ type: 'error', content: String((e && e.message) || e) });
+   send({ type: 'done' });
+ } finally {
+   innerLock = false;
+   try { res.end(); } catch { /* closed */ }
+   drainInnerQueue();
+ }
+ return;
+}
 
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
@@ -421,295 +784,8 @@ const server = http.createServer(async (req, res) => {
 
     // ---------- 内层对话 ----------
     if (p === '/api/inner/chat' && req.method === 'POST') {
-      if (innerLock) { json(res, 409, { success: false, error: '内层正在执行上一条任务，请稍候' }); return; }
-      const body = await readBody(req);
-      const message = String(body.message || '').trim();
-      if (!message) { json(res, 400, { success: false, error: '消息为空' }); return; }
-      const cfg = getConfig();
-      if (process.env.DUAL_AGENT_MOCK !== '1' && !(cfg.inner.base_url && cfg.inner.api_key && cfg.inner.model)) {
-        json(res, 400, { success: false, error: '内层 API 未配置：点右上角「配置」填写 base_url / api_key / model' });
-        return;
-      }
-      innerLock = true;
-      const send = sse(req, res);
-      send({ type: 'start' });
-      const WS_DIR = workspaceDir();
-      // 过程记录：任务头 + 待落盘的中间回复（text 快照式，工具调用前 flush 避免重复）
-      appendProcess(`\n---\n\n## ${fmtClock(Date.now())} 📋 任务\n\n${message}\n`);
-      let pendingText = '';
-      const flushText = () => {
-        if (pendingText.trim()) appendProcess(`\n### ${fmtClock(Date.now())} 💬 内层\n\n${pendingText.trim()}\n`);
-        pendingText = '';
-      };
-      // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）
-      // 确保系统提示在会话首位（历史会话无 system 时补插；reset 后重建）；每次重建注入当天日期
-      if (innerMessages[0] && innerMessages[0].role === 'system') innerMessages[0].content = buildInnerSystemPrompt();
-      else innerMessages.unshift({ role: 'system', content: buildInnerSystemPrompt() });
-      // 多步任务检测 → 注入 todo 提醒到 user 消息尾部（实测 agnes-2.5-flash 无视 system 程序指令，
-      // 但对紧邻任务文本遵循度高；注入落盘，历史中形成使用示范）
-      let finalMsg = message;
-      const multiStep = isMultiStepTask(message);
-      if (multiStep) {
-        finalMsg = message + '\n\n[框架提示] 本任务为多步任务，两项纪律：\n1) 开始执行前必须先用 todo 建任务清单（每个步骤一条 todo.add），每完成一步立即 todo.toggle(id=...)，全部完成时清单应全为 [x]。\n2) 收尾前必须用 verify 插件断言每个产出文件（exists + contains 内容特征 + line_count），看到 FAIL 先修复再重验，全 PASS 才能总结。';
-        send({ type: 'info', text: '检测到多步任务，已注入任务清单+产出验证提醒' });
-      }
-      // 意图契约抽取（v0.9.14 病根：长任务后段上下文折叠把任务原文埋进历史 → 交付漏项。
-      // todo 治步骤执行，意图契约治要求覆盖）。仅多步任务 + 真实模式启用（DUAL_AGENT_INTENT=0 关闭）；
-      // 抽取失败优雅降级返回 null，任务照常执行；换任务时旧契约必须清除（防过期要求污染后续任务）
-      const intentPath = path.join(WS_DIR, '.intent.json');
-      let intent = null;
-      if (process.env.DUAL_AGENT_MOCK !== '1' && multiStep && process.env.DUAL_AGENT_INTENT !== '0') {
-        send({ type: 'info', text: '多步任务：抽取意图契约（目标 / 交付物 / 验收条款）' });
-        intent = await extractIntent(cfg.inner, message, { onEvent: send });
-        if (intent) {
-          try { fs.writeFileSync(intentPath, JSON.stringify(intent, null, 1), 'utf8'); } catch { /* 落盘失败不阻断 */ }
-          send({ type: 'info', text: `意图契约已建立：交付物 ${intent.deliverables.length} 项 / 验收条款 ${intent.acceptance.length} 条（工作区 .intent.json）` });
-        } else {
-          try { fs.unlinkSync(intentPath); } catch { /* 本无旧文件 */ }
-          send({ type: 'info', text: '意图抽取失败，跳过意图闭环（任务照常执行）' });
-        }
-      } else {
-        try { fs.unlinkSync(intentPath); } catch { /* 清除上一任务的过期契约 */ }
-      }
-      // 意图注记：每轮读最新契约注入发送副本（复用 todoNote 模式，落盘干净）
-      const intentNote = () => {
-        try { return formatIntentNote(JSON.parse(fs.readFileSync(intentPath, 'utf8'))); } catch { return ''; }
-      };
-      innerMessages.push({ role: 'user', content: finalMsg });
-      persistInnerMessages();
-      // 事件处理器（主/子智能体共用）：过程落盘 + usage 落账 + SSE 透传（子事件带 sub 标记）
-      const handleEvent = (ev) => {
-        if (ev.type === 'text' && !ev.sub) pendingText = ev.text;
-        else if (ev.type === 'tool_call') {
-          flushText();
-          let pretty = '';
-          try { pretty = JSON.stringify(ev.args, null, 2); } catch { pretty = String(ev.args); }
-          appendProcess(`\n### ${fmtClock(Date.now())} 🔧 ${ev.sub ? '[子] ' : ''}${ev.plugin}\n\n**入参**\n\n\`\`\`json\n${pretty}\n\`\`\`\n`);
-        } else if (ev.type === 'tool_result') {
-          appendProcess(`**结果** ${ev.ok ? '✓' : '✗'}（${ev.ms}ms）${ev.sub ? ' [子智能体]' : ''}\n\n\`\`\`\n${String(ev.result).slice(0, 2000)}\n\`\`\`\n`);
-        } else if (ev.type === 'info') {
-          flushText();
-          appendProcess(`\n### ${fmtClock(Date.now())} ⏳ ${String(ev.text || '')}\n`);
-        } else if (ev.type === 'usage') {
-          // token 计量落盘：逐轮追加（当轮量 + 会话累计），usage 插件与审计由此取数；子智能体标记 sub
-          try {
-            const uf = path.join(WS_DIR, 'inner-usage.json');
-            let rows = [];
-            try { rows = JSON.parse(fs.readFileSync(uf, 'utf8')); } catch { /* 首次 */ }
-            if (!Array.isArray(rows)) rows = [];
-            rows.push({ ts: Date.now(), prompt: ev.last.prompt, completion: ev.last.completion, cached: ev.last.cached, est: !!ev.est, sub: !!ev.sub, profile: ev.tag || 'main',
-              totalsPrompt: ev.totals.prompt, totalsCompletion: ev.totals.completion, totalsCalls: ev.totals.calls });
-            fs.writeFileSync(uf, JSON.stringify(rows, null, 1), 'utf8');
-          } catch { /* 计量落盘失败不阻断会话 */ }
-            appendProcess(`\n> 📊 token${ev.sub ? `（子智能体${ev.tag ? '@' + ev.tag : ''}）` : ''}（第 ${ev.totals.calls} 次调用${ev.est ? '，估算' : '，API 真实返回'}）：prompt ${ev.last.prompt} + 输出 ${ev.last.completion}；会话累计 prompt ${ev.totals.prompt} + 输出 ${ev.totals.completion}\n`);
-        } else if (ev.type === 'error') {
-          flushText();
-          appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String(ev.content)}\n`);
-        }
-        send(ev);
-      };
-      // 子智能体派生（对标 Claude Code Task）：独立 messages 跑完整工具循环（8 轮上限），
-      // 探索过程隔离在子上下文，主上下文只收结论。子级 ctx 不带 spawnSub → 无法再派生（深度 1）。
-      // 多路 API（v0.9.6）：子任务轮转选择 inner_profiles 里的配置，并行请求分摊到不同端点，
-      // 避免同一 LLM API 的并发速率限制；未配置 profiles 时回退主配置（行为与旧版一致）。
-      // 限流韧性（v0.9.7）：轮次级 withRetry 短退避（1.5s 序列，主会话的一半——子任务轻量，
-      // 快速把结果交回主会话决策优于长等）；轮次重试耗尽后任务级 failover：换下一路 profile
-      // 从头重跑一次（无多路配置时直接失败），限流不再死磕单端点
-      const SUB_MAX_ROUNDS = 8;
-      const SUB_RETRY_BASE_MS = 1500;
-      const SUB_RR = { n: 0 }; // 轮转计数器：跨子任务递增，均匀分摊
-      const SUB_SYSTEM_BASE = [
-        '你是子智能体，负责独立完成一个调研/探索型子任务并返回结论。',
-        '规则：1) 直接执行，不要建 todo 清单；2) 结论必须自包含（数字/路径/关键原文），主会话看不到你的中间过程；',
-        '3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件；4) 结论 ≤300 字，先给结果再给一句依据；',
-        '5) 你的默认工作目录是 Agent 工作区（通常只有日志文件）。调研目标文件不存在时，先用 bash pwd/ls 定位实际路径',
-        '（项目源码常在仓库根，如 /workspace/dual-agent），用绝对路径访问，禁止一击不中就宣称"文件不存在"。'
-      ].join('\n');
-      // 可写版提示（v0.9.12 P1-6）：长任务的独立产出型子任务（改互不相同的文件）可委托子级并行写
-      const SUB_SYSTEM_WRITABLE = SUB_SYSTEM_BASE
-        .replace('负责独立完成一个调研/探索型子任务并返回结论', '负责独立完成一个产出型子任务（含写文件）并返回执行结果')
-        .replace('3) 只做只读探索（read/search/fetch/memory），除非子任务明确要求写文件', '3) 本任务授权写文件：用 write/edit 产出目标文件，写完必须 read 回验关键内容后才算完成')
-        + '\n6) 只写子任务指定的目标路径，禁止改动其他文件；产出后结论里报告写入路径与行数。';
-      const isTransientErr = e => !!(e && (e.retryable || (e.code && NET_CODES.test(e.code))));
-      // 病根教训（v0.9.7 压测抓出）：runSubOnce 独立函数，description 必须显式传参——
-      // 闭包只共享模块级变量，外层 spawnSub 的参数不在其作用域内（当时 ReferenceError 致 4 路全灭）
-      // writable（v0.9.12 P1-6）：执行层硬拦截——false 时子级 write/edit 调用直接拒绝（系统提示约束之外的保险丝）
-      const runSubOnce = async (picked, description, writable) => {
-        const subMessages = [
-          { role: 'system', content: writable ? SUB_SYSTEM_WRITABLE : SUB_SYSTEM_BASE },
-          { role: 'user', content: String(description) }
-        ];
-        const subCallPlugin = async (name, args) => {
-          if (!writable && (name === 'write' || name === 'edit')) {
-            const msg = `插件 ${name} 调用被拒绝：本子任务为只读探索型（未声明 writable），禁止写文件。如需产出文件，在结论中说明方案由主会话执行。`;
-            appendInnerLog({ ts: Date.now(), plugin: name, args, ok: false, result: msg.slice(0, 400), ms: 0, sub: true, profile: picked.name });
-            return msg;
-          }
-          const t0 = Date.now();
-          const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR }); // 无 spawnSub：子级禁止嵌套
-          appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0, sub: true, profile: picked.name });
-          return result;
-        };
-        const { chatInnerReal } = require('./lib/inner');
-        return await chatInnerReal(picked.cfg, subMessages, plugins.toolDefs(), subCallPlugin,
-          ev => handleEvent({ ...ev, sub: true, tag: ev.type === 'usage' ? picked.name : ev.tag }),
-          { maxRounds: SUB_MAX_ROUNDS, tag: picked.name, retryBaseMs: SUB_RETRY_BASE_MS });
-      };
-      const spawnSub = async (description, writable) => {
-        const picked = pickProfile(cfg, SUB_RR);
-        try {
-          return await runSubOnce(picked, description, writable);
-        } catch (e) {
-          if (!isTransientErr(e)) throw e; // 非限流/网络类错误（如 401 配置错）不换路重跑
-          const fallback = pickProfile(cfg, SUB_RR); // 换下一路（轮转计数器已前进）
-          if (fallback.name === picked.name) throw e; // 无其他路可换
-          handleEvent({ type: 'info', text: `子任务@${picked.name} 限流重试耗尽，failover 换路 @${fallback.name} 重跑` });
-          return await runSubOnce(fallback, description, writable);
-        }
-      };
-      // 搜索循环止损（v0.9.9 病根：真实调研会话 20 次同质搜索零有效结果，烧 183k prompt）：
-      // search 返回文本头部带「相关性 X.XX」，连续 <0.3 计数递增、达标清零；
-      // ≥3 次时在结果尾部注入强制策略升级指令（fetch 信源/换英文/subagent），打断重复模式
-      let lowSearchStreak = 0;
-      const callPlugin = async (name, args) => {
-        const t0 = Date.now();
-        const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR, spawnSub });
-        let final = result;
-        if (name === 'search') {
-          const m = /相关性 ([0-9.]+)/.exec(String(result));
-          if (m) {
-            if (Number(m[1]) < 0.3) lowSearchStreak += 1; else lowSearchStreak = 0;
-            if (lowSearchStreak >= 3) {
-              final = result + `\n\n[止损提醒] 已连续 ${lowSearchStreak} 次低质量搜索——继续换关键词重搜大概率重复失败。` +
-                `必须换策略：A) fetch 打开本次最相关结果的页面读正文；B) 换英文关键词；C) 直取权威信源（官方博客/行业报告）；` +
-                `D) 多信源调研改用 subagent 派生。禁止再执行第 ${lowSearchStreak + 1} 次同模式 search。`;
-              lowSearchStreak = 0; // 提醒一次后重置，避免每条都带
-            }
-          }
-        }
-        appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0 });
-        return final;
-      };
-      // 动态清单注记：每轮 API 调用前取最新 todo 状态注入发送副本（落盘干净）——
-      // 对标 Claude Code TodoList 的「执行中可见」，模型无需 todo.list 也能对齐进度、发现偏差即修订
-      const readTodo = () => {
-        try {
-          const arr = JSON.parse(fs.readFileSync(path.join(WS_DIR, '.todo.json'), 'utf8'));
-          return Array.isArray(arr) ? arr : [];
-        } catch { return []; }
-      };
-      const todoNote = () => {
-        const arr = readTodo();
-        if (!arr.length) return '';
-        const open = arr.filter(t => !t.done);
-        const done = arr.filter(t => t.done);
-        const lines = ['[任务清单] 当前进度（执行中发现计划不适用必须修订：todo.add 加步骤/调整后再继续）：'];
-        for (const t of open) lines.push(`- [ ] #${t.id} ${t.text}`);
-        const recentDone = done.slice(-3);
-        for (const t of recentDone) lines.push(`- [x] #${t.id} ${t.text}`);
-        if (done.length > recentDone.length) lines.push(`- （另有 ${done.length - recentDone.length} 项已完成略）`);
-        return lines.join('\n');
-      };
-      // 自动续航判定（v0.9.12 P0-3）：清单存在且有未完成项 → 撞段上限时值得续航
-      const shouldContinue = () => readTodo().some(t => !t.done);
-      // 里程碑记忆（v0.9.12 P1-4）：todo.toggle 把一项从待办变为完成时自动 memory.save
-      // 进度摘要——长任务后段上下文被预算折叠时，早期决策依据可从记忆召回。
-      // 病根：memory.save 全靠模型自觉，实测长任务后段"忘了自己为什么这么做"
-      let prevDoneIds = new Set(readTodo().filter(t => t.done).map(t => t.id));
-      const milestoneWatch = (name, args) => {
-        if (name !== 'todo' || !args || String(args.action) !== 'toggle') return;
-        try {
-          const arr = readTodo();
-          const nowDone = arr.filter(t => t.done);
-          const fresh = nowDone.filter(t => !prevDoneIds.has(t.id));
-          prevDoneIds = new Set(nowDone.map(t => t.id));
-          for (const t of fresh) {
-            plugins.runPlugin('memory', {
-              action: 'save', level: 'short',
-              content: `里程碑完成：#${t.id} ${t.text}（剩余 ${arr.filter(x => !x.done).length} 项未完成）`,
-              tags: ['进度']
-            }, { cwd: WS_DIR, dataDir: DATA_DIR }).catch(() => {});
-          }
-        } catch { /* 记忆失败不阻断任务 */ }
-      };
-      const callPluginWrapped = async (name, args) => {
-        const result = await callPlugin(name, args); // 先执行（toggle 落盘后再对比，否则读到旧状态）
-        milestoneWatch(name, args);
-        return result;
-      };
-      try {
-        // 统一入口：任务级自动重入（v0.9.13）包裹 chatInner——withRetry 耗尽（断网/持续限流
-        // 超约 2 分钟）后 30s/60s/120s 退避重入续跑。重入安全：异常抛出点 messages 尾部
-        // 必为完整配对，模型看到尾部工具结果自然续跑，已完成步骤不重做
-        const runInner = () => chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
-          todoNote,
-          shouldContinue,
-          intentNote,
-          // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
-          onRound: () => persistInnerMessages()
-        });
-        let lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '内层任务' });
-        // 交付核验 + 自动返修（v0.9.14）：对照意图契约核验（硬断言先行，语义缺口 judge 补），
-        // 发现缺口注入返修指令重入执行，上限 2 轮（防完美主义死循环——v0.9.10 教训的反面）
-        if (intent) {
-          const collectGaps = async () => {
-            const gaps = [];
-            const hardLines = [];
-            // 硬断言：文件类交付物 exists / json_valid（框架判定，零 token）
-            for (const va of buildVerifyArgs(intent)) {
-              try {
-                const r = String(await plugins.runPlugin('verify', va, { cwd: WS_DIR, dataDir: DATA_DIR }));
-                hardLines.push(`${va.path}：${r.split('\n')[0].slice(0, 120)}`);
-                if (/FAIL/.test(r)) gaps.push(`交付文件未达标（硬断言 FAIL）：${va.path}`);
-              } catch (e) {
-                hardLines.push(`${va.path}：断言异常`);
-                gaps.push(`交付文件无法核验：${va.path}——${String((e && e.message) || e).slice(0, 120)}`);
-              }
-            }
-            // LLM judge：核验语义覆盖（明确的问题是否回答、要求的维度是否齐全）。
-            // 只在硬断言干净时跑（已失败时返修必然发生，省一次调用）；judge 失败按无缺口处理
-            if (!gaps.length) {
-              try {
-                const verdictText = await callLLMText(cfg.inner, [
-                  { role: 'system', content: '你是交付核验裁判，只输出 JSON。' },
-                  { role: 'user', content: buildJudgePrompt(intent, lastAnswer, hardLines) }
-                ], { maxTokens: 500, onEvent: send, label: '交付核验' });
-                gaps.push(...parseVerdict(verdictText).gaps);
-              } catch { /* judge 通道故障按通过处理 */ }
-            }
-            return gaps;
-          };
-          const MAX_REPAIR = 2;
-          for (let r = 0; ; r++) {
-            const gaps = await collectGaps();
-            appendProcess(`\n### ${fmtClock(Date.now())} ✅ 交付核验（第 ${r + 1} 次）\n\n${gaps.length ? gaps.map((g, i) => `${i + 1}. ${g}`).join('\n') : 'PASS：意图契约全部条款满足'}\n`);
-            if (!gaps.length) {
-              send({ type: 'info', text: '[交付核验] PASS：交付满足意图契约全部条款' });
-              break;
-            }
-            if (r >= MAX_REPAIR) {
-              send({ type: 'info', text: `[交付核验] 返修上限（${MAX_REPAIR} 轮）已到，仍有 ${gaps.length} 项缺口，带缺口标注交付` });
-              lastAnswer = `${lastAnswer}\n\n[交付核验缺口标注] 以下要求经 ${MAX_REPAIR + 1} 次核验仍未满足：\n${gaps.map((g, i) => `${i + 1}. ${g}`).join('\n')}`;
-              break;
-            }
-            const repairMsg = `[交付核验] 对照意图契约发现以下未满足项：\n${gaps.map((g, i) => `${i + 1}. ${g}`).join('\n')}\n请立即针对性修复上述缺口（已满足的项不要重做），完成后重新交付总结。`;
-            innerMessages.push({ role: 'user', content: repairMsg });
-            persistInnerMessages();
-            send({ type: 'info', text: `[交付核验] 发现 ${gaps.length} 项缺口，自动返修（第 ${r + 1}/${MAX_REPAIR} 轮）` });
-            lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '返修任务' });
-          }
-        }
-        flushText();
-        persistInnerMessages();
-        send({ type: 'done' });
-      } catch (e) {
-        appendProcess(`\n### ${fmtClock(Date.now())} ❌ 错误\n\n${String((e && e.message) || e)}\n`);
-        send({ type: 'error', content: String((e && e.message) || e) });
-        send({ type: 'done' });
-      } finally {
-        innerLock = false;
-        try { res.end(); } catch { /* closed */ }
-      }
+      lastSeen = Date.now();
+      await handleInnerChat(req, res);
       return;
     }
     // 过程文件内容（/process 页轮询拉取；执行中任务 mtime 变化时增量刷新）

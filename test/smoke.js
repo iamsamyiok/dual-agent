@@ -1511,15 +1511,87 @@ async function main() {
     assert.ok(r.success, r.error);
     assert.ok(!r.plugins.some(p => p.name === 'append'));
   });
-  await t('并发互斥：第二路内层请求返回 409', async () => {
-    // 用慢请求占住锁：向 inner-log 注入长任务不可行；改为直接并行双发，断言至少一路成功
+  await t('并发互斥：并行双发至少一路成功（窗口小不强制互斥形态）', async () => {
     const [a, b] = await Promise.allSettled([
       fetch(base + '/api/inner/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: '并发A' }) }),
       fetch(base + '/api/inner/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: '并发B' }) })
     ]);
     const codes = [a, b].map(x => x.status === 'fulfilled' ? x.value.status : -1);
     assert.ok(codes.some(c => c === 200), '至少一路成功');
-    // mock 执行快，锁窗口小：409 可选出现，不强制
+    // v0.9.15 起撞锁消息入队（queued 事件）而非 409 丢弃；时序窗口小不强制形态
+  });
+
+  // ===== 消息排队（v0.9.15 病根：409 直接丢用户消息 + 界面答非所问错位）=====
+  // 独立实例 + DUAL_AGENT_TEST_HOLD 时序钩子：第一路 hold 中，第二/三路应入队（200 + queued 事件），
+  // hold 结束后队列自动消化执行，结果落盘可查
+  await t('排队：执行中消息入队（queued 事件）→ 任务完成后自动执行（v0.9.15）', async () => {
+    const PORT2 = PORT + 1;
+    const srv2 = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
+      env: { ...process.env, DUAL_AGENT_MOCK: '1', DUAL_AGENT_DATA: DATA_TMP + '-q', DUAL_AGENT_PLUGINS_DIR: PLUGINS_TMP, DUAL_AGENT_WS_ROOT: path.join(TMP, 'ws-root-q'), PORT: String(PORT2), DUAL_AGENT_TEST_HOLD: '700' },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    try {
+      await new Promise(r => setTimeout(r, 1500));
+      const base2 = `http://127.0.0.1:${PORT2}`;
+      // 第一路：占锁（hold 700ms）
+      const first = fetch(base2 + '/api/inner/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: '任务一' }) });
+      await new Promise(r => setTimeout(r, 250));
+      // 第二/三路：撞锁 → 应 200 + queued
+      const readSSE = async resp => {
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        const events = [];
+        let buf = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf('\n\n')) >= 0) {
+            const line = buf.slice(0, i).split('\n').find(l => l.startsWith('data: '));
+            if (line) { try { events.push(JSON.parse(line.slice(6))); } catch { /* ignore */ } }
+            buf = buf.slice(i + 2);
+          }
+        }
+        return events;
+      };
+      const [q2, q3] = await Promise.all([
+        (async () => { const r = await fetch(base2 + '/api/inner/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: '排队消息二' }) }); return { status: r.status, events: await readSSE(r) }; })(),
+        (async () => { const r = await fetch(base2 + '/api/inner/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: '排队消息三' }) }); return { status: r.status, events: await readSSE(r) }; })()
+      ]);
+      assert.equal(q2.status, 200, '排队请求返回 200（SSE）');
+      assert.equal(q3.status, 200, '第二条排队请求返回 200');
+      const ev2 = q2.events.find(e => e.type === 'queued');
+      const ev3 = q3.events.find(e => e.type === 'queued');
+      assert.ok(ev2 && /已排队/.test(ev2.text), '第二条收到 queued 事件：' + JSON.stringify(q2.events.map(e => e.type)));
+      assert.ok(ev3 && /已排队/.test(ev3.text), '第三条收到 queued 事件');
+      assert.ok(q2.events.some(e => e.type === 'done') && q3.events.some(e => e.type === 'done'), '排队响应正常收尾');
+      // 等第一路完成 + 队列消化（轮询 messages，上限 8s）
+      await first;
+      let msgs = [];
+      for (let i = 0; i < 40; i++) {
+        await new Promise(r => setTimeout(r, 200));
+        const r = await (await fetch(base2 + '/api/inner/messages')).json();
+        msgs = r.messages || [];
+        const has2 = msgs.some(m => m.role === 'user' && String(m.content).includes('排队消息二'));
+        const has3 = msgs.some(m => m.role === 'user' && String(m.content).includes('排队消息三'));
+        if (has2 && has3) break;
+      }
+      assert.ok(msgs.some(m => m.role === 'user' && String(m.content).includes('排队消息二')), '队列消息二被自动执行入史');
+      assert.ok(msgs.some(m => m.role === 'user' && String(m.content).includes('排队消息三')), '队列消息三被自动执行入史');
+      const qfile = JSON.parse(fs.readFileSync(path.join(DATA_TMP + '-q', 'inner-queue.json'), 'utf8'));
+      assert.equal(Array.isArray(qfile) && qfile.length, 0, '队列文件清空');
+    } finally {
+      srv2.kill();
+    }
+  });
+  await t('静态防回归：排队分支在 message 定义之后（TDZ 教训）+ 启动即消化恢复队列', () => {
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    const msgDef = srv.indexOf('const message = String(body.message');
+    const queuePush = srv.indexOf('innerQueue.push(message)');
+    assert.ok(msgDef > 0 && queuePush > msgDef, '排队 push 必须在 message 解析之后（重构时差点引入 TDZ ReferenceError）');
+    assert.ok(/restoreInnerQueue\(\);[\s\S]{0,200}setImmediate\(\(\) => \{ drainInnerQueue\(\)/.test(srv), '重启恢复队列后立即消化');
+    assert.ok(/fromQueue/.test(srv) && /innerLock && !fromQueue/.test(srv), '队列消化跳过锁检查（防竞态窗口重新排队乱序）');
   });
 
   // ===== token 计量相关测试 =====
