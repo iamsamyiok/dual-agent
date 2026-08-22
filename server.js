@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.20';
+const APP_VERSION = '0.9.21';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -494,20 +494,23 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
  // todo 治步骤执行，意图契约治要求覆盖）。仅多步任务 + 真实模式启用（DUAL_AGENT_INTENT=0 关闭）；
  // 抽取失败优雅降级返回 null，任务照常执行；换任务时旧契约必须清除（防过期要求污染后续任务）
  const intentPath = path.join(WS_DIR, '.intent.json');
- let intent = null;
- if (process.env.DUAL_AGENT_MOCK !== '1' && multiStep && process.env.DUAL_AGENT_INTENT !== '0') {
-   send({ type: 'info', text: '多步任务：抽取意图契约（目标 / 交付物 / 验收条款）' });
-   intent = await extractIntent(cfg.inner, message, { onEvent: send });
-   if (intent) {
-     try { fs.writeFileSync(intentPath, JSON.stringify(intent, null, 1), 'utf8'); } catch { /* 落盘失败不阻断 */ }
-     send({ type: 'info', text: `意图契约已建立：交付物 ${intent.deliverables.length} 项 / 验收条款 ${intent.acceptance.length} 条（工作区 .intent.json）` });
-   } else {
-     try { fs.unlinkSync(intentPath); } catch { /* 本无旧文件 */ }
-     send({ type: 'info', text: '意图抽取失败，跳过意图闭环（任务照常执行）' });
-   }
- } else {
-   try { fs.unlinkSync(intentPath); } catch { /* 清除上一任务的过期契约 */ }
- }
+  let intent = null;
+  if (process.env.DUAL_AGENT_MOCK !== '1' && process.env.DUAL_AGENT_INTENT !== '0') {
+    const needsIntent = multiStep || isLongFormTask(message);
+    if (needsIntent) {
+      send({ type: 'info', text: '多步/长文任务：抽取意图契约（目标 / 交付物 / 验收条款）' });
+      intent = await extractIntent(cfg.inner, message, { onEvent: send });
+      if (intent) {
+        try { fs.writeFileSync(intentPath, JSON.stringify(intent, null, 1), 'utf8'); } catch { /* 落盘失败不阻断 */ }
+        send({ type: 'info', text: `意图契约已建立：交付物 ${intent.deliverables.length} 项 / 验收条款 ${intent.acceptance.length} 条（工作区 .intent.json）` });
+      } else {
+        try { fs.unlinkSync(intentPath); } catch { /* 本无旧文件 */ }
+        send({ type: 'info', text: '意图抽取失败，跳过意图闭环（任务照常执行）' });
+      }
+    } else {
+      try { fs.unlinkSync(intentPath); } catch { /* 清除上一任务的过期契约 */ }
+    }
+  }
  // 意图注记：每轮读最新契约注入发送副本（复用 todoNote 模式，落盘干净）
  const intentNote = () => {
    try { return formatIntentNote(JSON.parse(fs.readFileSync(intentPath, 'utf8'))); } catch { return ''; }
@@ -571,18 +574,19 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
  // 病根教训（v0.9.7 压测抓出）：runSubOnce 独立函数，description 必须显式传参——
  // 闭包只共享模块级变量，外层 spawnSub 的参数不在其作用域内（当时 ReferenceError 致 4 路全灭）
  // writable（v0.9.12 P1-6）：执行层硬拦截——false 时子级 write/edit 调用直接拒绝（系统提示约束之外的保险丝）
- const runSubOnce = async (picked, description, writable) => {
-   const subMessages = [
-     { role: 'system', content: writable ? SUB_SYSTEM_WRITABLE : SUB_SYSTEM_BASE },
-     { role: 'user', content: String(description) }
-   ];
-   const subCallPlugin = async (name, args) => {
-     if (!writable && (name === 'write' || name === 'edit')) {
-       const msg = `插件 ${name} 调用被拒绝：本子任务为只读探索型（未声明 writable），禁止写文件。如需产出文件，在结论中说明方案由主会话执行。`;
-       appendInnerLog({ ts: Date.now(), plugin: name, args, ok: false, result: msg.slice(0, 400), ms: 0, sub: true, profile: picked.name });
-       return msg;
-     }
-     const t0 = Date.now();
+  const runSubOnce = async (picked, description, writable, onWrote) => {
+    const subMessages = [
+      { role: 'system', content: writable ? SUB_SYSTEM_WRITABLE : SUB_SYSTEM_BASE },
+      { role: 'user', content: String(description) }
+    ];
+    const subCallPlugin = async (name, args) => {
+      if (!writable && (name === 'write' || name === 'edit')) {
+        const msg = `插件 ${name} 调用被拒绝：本子任务为只读探索型（未声明 writable），禁止写文件。如需产出文件，在结论中说明方案由主会话执行。`;
+        appendInnerLog({ ts: Date.now(), plugin: name, args, ok: false, result: msg.slice(0, 400), ms: 0, sub: true, profile: picked.name });
+        return msg;
+      }
+      if ((name === 'write' || name === 'edit') && typeof onWrote === 'function') onWrote();
+      const t0 = Date.now();
      const result = await plugins.runPlugin(name, args, { cwd: WS_DIR, dataDir: DATA_DIR }); // 无 spawnSub：子级禁止嵌套
      appendInnerLog({ ts: Date.now(), plugin: name, args, ok: !/^(插件 .+?(加载失败|执行出错|调用被拒绝))/.test(result), result: String(result).slice(0, 400), ms: Date.now() - t0, sub: true, profile: picked.name });
      return result;
@@ -592,11 +596,11 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
      ev => handleEvent({ ...ev, sub: true, tag: ev.type === 'usage' ? picked.name : ev.tag }),
      { maxRounds: SUB_MAX_ROUNDS, tag: picked.name, retryBaseMs: SUB_RETRY_BASE_MS });
  };
- const spawnSub = async (description, writable) => {
-   const picked = pickProfile(cfg, SUB_RR);
-   try {
-     return await runSubOnce(picked, description, writable);
-   } catch (e) {
+  const spawnSub = async (description, writable) => {
+    const picked = pickProfile(cfg, SUB_RR);
+    try {
+      return await runSubOnce(picked, description, writable, signalWrote);
+    } catch (e) {
      if (!isTransientErr(e)) throw e; // 非限流/网络类错误（如 401 配置错）不换路重跑
      const fallback = pickProfile(cfg, SUB_RR); // 换下一路（轮转计数器已前进）
      if (fallback.name === picked.name) throw e; // 无其他路可换
@@ -669,16 +673,18 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
      }
    } catch { /* 记忆失败不阻断任务 */ }
  };
- // 长文执行强制的写入探针（v0.9.18）：callPluginWrapped 里置位，runInner 结束后检查
- let wroteAny = false;
- const callPluginWrapped = async (name, args) => {
-   // 长文执行强制（v0.9.18）：记录本任务是否发生过真实写入（write/edit，或 bash 重定向/heredoc）
-   if (name === 'write' || name === 'edit') wroteAny = true;
-   else if (name === 'bash' && args && /(>>|>|<<|tee\s)/.test(String(args.command || ''))) wroteAny = true;
-   const result = await callPlugin(name, args); // 先执行（toggle 落盘后再对比，否则读到旧状态）
-   milestoneWatch(name, args);
-   return result;
- };
+  // 长文执行强制的写入探针（v0.9.18）：callPluginWrapped 里置位，runInner 结束后检查
+  let wroteAny = false;
+  // P13：子智能体写操作也能置位 wroteAny（通过回调传递）
+  const signalWrote = () => { wroteAny = true; };
+  const callPluginWrapped = async (name, args) => {
+    // 长文执行强制（v0.9.18）：记录本任务是否发生过真实写入（write/edit，或 bash 重定向/heredoc）
+    if (name === 'write' || name === 'edit') wroteAny = true;
+    else if (name === 'bash' && args && /(>>|>|<<|tee\s)/.test(String(args.command || ''))) wroteAny = true;
+    const result = await callPlugin(name, args); // 先执行（toggle 落盘后再对比，否则读到旧状态）
+    milestoneWatch(name, args);
+    return result;
+  };
  try {
    // 统一入口：任务级自动重入（v0.9.13）包裹 chatInner——withRetry 耗尽（断网/持续限流
    // 超约 2 分钟）后 30s/60s/120s 退避重入续跑。重入安全：异常抛出点 messages 尾部
@@ -690,16 +696,19 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
      // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
      onRound: () => persistInnerMessages()
    });
-   let lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '内层任务' });
-  // 长文执行强制（v0.9.18 病根：实测 agnes-2.5-flash 收到创作纪律后仍"讲道理+反问"
-  // 空谈一轮零工具调用——能力账本注入后概率降低但不归零，框架必须兜底）。检测：
-  // 长文任务 + 全程零写入 → 注入行动令重入执行一次（单发，不循环——防教条死磕）
-  if (isLongFormTask(message) && !wroteAny) {
-    send({ type: 'info', text: '长文任务零写入收场，注入行动令强制重入执行' });
-    innerMessages.push({ role: 'user', content: '[框架提示] 你上一条回复仍停留在解释/方案/提问，没有执行任何写入动作，这不是完成任务。现在必须立即开始执行：第一步 todo.add 建章节清单，第二步 write 写入第一章首段，之后逐段 append 直到完成。本条指令生效后禁止再输出任何解释或问题，第一条消息就必须是 todo.add 工具调用。' });
-    persistInnerMessages();
-    lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '长文强制执行' });
-  }
+    let lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '内层任务' });
+   // 长文执行强制（v0.9.18 病根：实测 agnes-2.5-flash 收到创作纪律后仍"讲道理+反问"
+   // 空谈一轮零工具调用——能力账本注入后概率降低但不归零，框架必须兜底）。检测：
+   // 长文任务 + 全程零写入 → 注入行动令重入执行（P11 改进：允许最多 2 次，防一次失效全放弃）
+   let longFormForceCount = 0;
+   while (isLongFormTask(message) && !wroteAny && longFormForceCount < 2) {
+     longFormForceCount += 1;
+     send({ type: 'info', text: `长文任务零写入收场（第 ${longFormForceCount} 次），注入行动令强制重入执行` });
+     innerMessages.push({ role: 'user', content: '[框架提示] 你上一条回复仍停留在解释/方案/提问，没有执行任何写入动作，这不是完成任务。现在必须立即开始执行：第一步 todo.add 建章节清单，第二步 write 写入第一章首段，之后逐段 append 直到完成。本条指令生效后禁止再输出任何解释或问题，第一条消息就必须是 todo.add 工具调用。' });
+     persistInnerMessages();
+     wroteAny = false; // 重置探针，检测重入后是否仍有写入
+     lastAnswer = await withTaskResume(runInner, { onInfo: send, label: `长文强制执行${longFormForceCount > 1 ? '-' + longFormForceCount : ''}` });
+   }
    // 交付核验 + 自动返修（v0.9.14）：对照意图契约核验（硬断言先行，语义缺口 judge 补），
    // 发现缺口注入返修指令重入执行，上限 2 轮（防完美主义死循环——v0.9.10 教训的反面）
    if (intent) {
