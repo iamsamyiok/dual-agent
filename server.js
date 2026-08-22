@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.13';
+const APP_VERSION = '0.9.14';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -23,6 +23,7 @@ const outerMod = require('./lib/outer');
 const { chatInner, isMultiStepTask, pairSafeTail } = require('./lib/inner');
 const { validProfiles, pickProfile } = require('./lib/profiles');
 const { NET_CODES, withTaskResume } = require('./lib/llmRetry');
+const { extractIntent, formatIntentNote, buildVerifyArgs, buildJudgePrompt, parseVerdict, callLLMText } = require('./lib/intent');
 
 // ---------- 日志 tee ----------
 const LOG_PATH = path.join(DATA_DIR, 'server.log');
@@ -447,10 +448,33 @@ const server = http.createServer(async (req, res) => {
       // 多步任务检测 → 注入 todo 提醒到 user 消息尾部（实测 agnes-2.5-flash 无视 system 程序指令，
       // 但对紧邻任务文本遵循度高；注入落盘，历史中形成使用示范）
       let finalMsg = message;
-      if (isMultiStepTask(message)) {
+      const multiStep = isMultiStepTask(message);
+      if (multiStep) {
         finalMsg = message + '\n\n[框架提示] 本任务为多步任务，两项纪律：\n1) 开始执行前必须先用 todo 建任务清单（每个步骤一条 todo.add），每完成一步立即 todo.toggle(id=...)，全部完成时清单应全为 [x]。\n2) 收尾前必须用 verify 插件断言每个产出文件（exists + contains 内容特征 + line_count），看到 FAIL 先修复再重验，全 PASS 才能总结。';
         send({ type: 'info', text: '检测到多步任务，已注入任务清单+产出验证提醒' });
       }
+      // 意图契约抽取（v0.9.14 病根：长任务后段上下文折叠把任务原文埋进历史 → 交付漏项。
+      // todo 治步骤执行，意图契约治要求覆盖）。仅多步任务 + 真实模式启用（DUAL_AGENT_INTENT=0 关闭）；
+      // 抽取失败优雅降级返回 null，任务照常执行；换任务时旧契约必须清除（防过期要求污染后续任务）
+      const intentPath = path.join(WS_DIR, '.intent.json');
+      let intent = null;
+      if (process.env.DUAL_AGENT_MOCK !== '1' && multiStep && process.env.DUAL_AGENT_INTENT !== '0') {
+        send({ type: 'info', text: '多步任务：抽取意图契约（目标 / 交付物 / 验收条款）' });
+        intent = await extractIntent(cfg.inner, message, { onEvent: send });
+        if (intent) {
+          try { fs.writeFileSync(intentPath, JSON.stringify(intent, null, 1), 'utf8'); } catch { /* 落盘失败不阻断 */ }
+          send({ type: 'info', text: `意图契约已建立：交付物 ${intent.deliverables.length} 项 / 验收条款 ${intent.acceptance.length} 条（工作区 .intent.json）` });
+        } else {
+          try { fs.unlinkSync(intentPath); } catch { /* 本无旧文件 */ }
+          send({ type: 'info', text: '意图抽取失败，跳过意图闭环（任务照常执行）' });
+        }
+      } else {
+        try { fs.unlinkSync(intentPath); } catch { /* 清除上一任务的过期契约 */ }
+      }
+      // 意图注记：每轮读最新契约注入发送副本（复用 todoNote 模式，落盘干净）
+      const intentNote = () => {
+        try { return formatIntentNote(JSON.parse(fs.readFileSync(intentPath, 'utf8'))); } catch { return ''; }
+      };
       innerMessages.push({ role: 'user', content: finalMsg });
       persistInnerMessages();
       // 事件处理器（主/子智能体共用）：过程落盘 + usage 落账 + SSE 透传（子事件带 sub 标记）
@@ -614,18 +638,67 @@ const server = http.createServer(async (req, res) => {
         return result;
       };
       try {
-        // 任务级自动重入（v0.9.13）：withRetry 耗尽（断网/持续限流超约 2 分钟）后不再让任务
-        // 直接死掉——30s/60s/120s 退避后用同一份 innerMessages 重入 chatInner 续跑。
-        // 重入安全：异常抛出点 messages 尾部必为完整配对，模型看到尾部工具结果自然续跑
-        await withTaskResume(
-          () => chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
-            todoNote,
-            shouldContinue,
-            // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
-            onRound: () => persistInnerMessages()
-          }),
-          { onInfo: send, label: '内层任务' }
-        );
+        // 统一入口：任务级自动重入（v0.9.13）包裹 chatInner——withRetry 耗尽（断网/持续限流
+        // 超约 2 分钟）后 30s/60s/120s 退避重入续跑。重入安全：异常抛出点 messages 尾部
+        // 必为完整配对，模型看到尾部工具结果自然续跑，已完成步骤不重做
+        const runInner = () => chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
+          todoNote,
+          shouldContinue,
+          intentNote,
+          // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
+          onRound: () => persistInnerMessages()
+        });
+        let lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '内层任务' });
+        // 交付核验 + 自动返修（v0.9.14）：对照意图契约核验（硬断言先行，语义缺口 judge 补），
+        // 发现缺口注入返修指令重入执行，上限 2 轮（防完美主义死循环——v0.9.10 教训的反面）
+        if (intent) {
+          const collectGaps = async () => {
+            const gaps = [];
+            const hardLines = [];
+            // 硬断言：文件类交付物 exists / json_valid（框架判定，零 token）
+            for (const va of buildVerifyArgs(intent)) {
+              try {
+                const r = String(await plugins.runPlugin('verify', va, { cwd: WS_DIR, dataDir: DATA_DIR }));
+                hardLines.push(`${va.path}：${r.split('\n')[0].slice(0, 120)}`);
+                if (/FAIL/.test(r)) gaps.push(`交付文件未达标（硬断言 FAIL）：${va.path}`);
+              } catch (e) {
+                hardLines.push(`${va.path}：断言异常`);
+                gaps.push(`交付文件无法核验：${va.path}——${String((e && e.message) || e).slice(0, 120)}`);
+              }
+            }
+            // LLM judge：核验语义覆盖（明确的问题是否回答、要求的维度是否齐全）。
+            // 只在硬断言干净时跑（已失败时返修必然发生，省一次调用）；judge 失败按无缺口处理
+            if (!gaps.length) {
+              try {
+                const verdictText = await callLLMText(cfg.inner, [
+                  { role: 'system', content: '你是交付核验裁判，只输出 JSON。' },
+                  { role: 'user', content: buildJudgePrompt(intent, lastAnswer, hardLines) }
+                ], { maxTokens: 500, onEvent: send, label: '交付核验' });
+                gaps.push(...parseVerdict(verdictText).gaps);
+              } catch { /* judge 通道故障按通过处理 */ }
+            }
+            return gaps;
+          };
+          const MAX_REPAIR = 2;
+          for (let r = 0; ; r++) {
+            const gaps = await collectGaps();
+            appendProcess(`\n### ${fmtClock(Date.now())} ✅ 交付核验（第 ${r + 1} 次）\n\n${gaps.length ? gaps.map((g, i) => `${i + 1}. ${g}`).join('\n') : 'PASS：意图契约全部条款满足'}\n`);
+            if (!gaps.length) {
+              send({ type: 'info', text: '[交付核验] PASS：交付满足意图契约全部条款' });
+              break;
+            }
+            if (r >= MAX_REPAIR) {
+              send({ type: 'info', text: `[交付核验] 返修上限（${MAX_REPAIR} 轮）已到，仍有 ${gaps.length} 项缺口，带缺口标注交付` });
+              lastAnswer = `${lastAnswer}\n\n[交付核验缺口标注] 以下要求经 ${MAX_REPAIR + 1} 次核验仍未满足：\n${gaps.map((g, i) => `${i + 1}. ${g}`).join('\n')}`;
+              break;
+            }
+            const repairMsg = `[交付核验] 对照意图契约发现以下未满足项：\n${gaps.map((g, i) => `${i + 1}. ${g}`).join('\n')}\n请立即针对性修复上述缺口（已满足的项不要重做），完成后重新交付总结。`;
+            innerMessages.push({ role: 'user', content: repairMsg });
+            persistInnerMessages();
+            send({ type: 'info', text: `[交付核验] 发现 ${gaps.length} 项缺口，自动返修（第 ${r + 1}/${MAX_REPAIR} 轮）` });
+            lastAnswer = await withTaskResume(runInner, { onInfo: send, label: '返修任务' });
+          }
+        }
         flushText();
         persistInnerMessages();
         send({ type: 'done' });

@@ -553,7 +553,7 @@ async function main() {
   });
   await t('静态接线：server /api/inner/chat 用 withTaskResume 包裹 chatInner（v0.9.13）', () => {
     const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
-    assert.ok(/withTaskResume\(\s*\(\) => chatInner\(/.test(srv), 'chatInner 调用被 withTaskResume 包裹');
+    assert.ok(/const runInner = \(\) => chatInner\(/.test(srv) && /withTaskResume\(runInner/.test(srv), 'chatInner 经 runInner 被 withTaskResume 包裹');
     assert.ok(/\{ onInfo: send, label: '内层任务' \}/.test(srv), '恢复提示走 SSE info 通道');
   });
 
@@ -593,6 +593,110 @@ async function main() {
     const stream = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(body)); c.close(); } });
     return new Response(stream, { status: 200 });
   };
+  // ===== 意图闭环（v0.9.14 病根：长任务后段上下文折叠埋掉任务原文 → 交付漏项）=====
+  const { parseLooseJson, normalizeIntent, extractIntent, formatIntentNote, buildVerifyArgs, buildJudgePrompt, parseVerdict } = require(path.join(ROOT, 'lib', 'intent'));
+  await t('parseLooseJson：围栏 / 前置解释文字 / 垃圾输入', () => {
+    assert.deepEqual(parseLooseJson('```json\n{"a":1}\n```'), { a: 1 }, '剥离围栏');
+    assert.deepEqual(parseLooseJson('好的，以下是结果：{"a":2} 完成'), { a: 2 }, '截取首尾大括号');
+    assert.equal(parseLooseJson('完全不是 JSON'), null, '垃圾返回 null');
+    assert.equal(parseLooseJson(''), null, '空串安全');
+  });
+  await t('normalizeIntent：字段清洗 / path null 归一 / 空意图返回 null', () => {
+    const n = normalizeIntent({
+      task: '  创建文件并验证 ',
+      goals: ['产出文件', 42, '  '],
+      deliverables: [{ path: 'a.txt', criterion: '存在' }, { path: null, criterion: '答案正确' }, 'bad', { path: 'b.json' }],
+      constraints: ['不许改动其他文件'],
+      acceptance: ['a.txt 存在']
+    });
+    assert.equal(n.goals.length, 1, '非字符串与空白条目剔除');
+    assert.equal(n.deliverables.length, 3, '合法交付物保留');
+    assert.equal(n.deliverables[1].path, null, '非文件交付物 path 归一为 null');
+    assert.equal(n.deliverables[2].criterion, '', '缺 criterion 补空串');
+    assert.equal(normalizeIntent({}), null, '全空返回 null');
+    assert.equal(normalizeIntent(null), null, 'null 安全');
+  });
+  await t('extractIntent：mock SSE JSON → 意图契约；垃圾输出 → null 优雅降级', async () => {
+    const origFetch = globalThis.fetch;
+    let mode = 'good';
+    globalThis.fetch = async () => {
+      if (mode === 'good') return sseResponse([JSON.stringify({ choices: [{ delta: { content: '```json\n{"task":"三步任务","goals":["产出两文件"],"deliverables":[{"path":"alpha.txt","criterion":"存在且含指定内容"},{"path":null,"criterion":"对比结论明确"}],"acceptance":["两文件都存在","给出对比结论"]}' } }] }), '[DONE]']);
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: '我无法解析该任务' } }] }), '[DONE]']);
+    };
+    try {
+      const good = await extractIntent({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, '任务A');
+      assert.ok(good, 'good 模式返回意图');
+      assert.equal(good.deliverables.length, 2, '交付物解析');
+      assert.equal(good.deliverables[1].path, null, '非文件交付物');
+      mode = 'bad';
+      const bad = await extractIntent({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, '任务B');
+      assert.equal(bad, null, '垃圾输出返回 null（任务照常执行的降级路径）');
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('formatIntentNote：含交付物/验收/权威来源声明（每轮注记防遗忘）', () => {
+    const note = formatIntentNote(normalizeIntent({
+      task: '创建并对比', deliverables: [{ path: 'a.txt', criterion: '存在' }],
+      acceptance: ['a.txt 存在'], constraints: ['只写指定文件']
+    }));
+    assert.ok(note.startsWith('[意图契约]'), '注记头标识');
+    assert.ok(note.includes('a.txt') && note.includes('a.txt 存在'), '交付物与验收注入');
+    assert.ok(note.includes('权威来源'), '折叠场景的权威声明');
+    assert.ok(note.length < 800, `注记保持精简（实际 ${note.length} 字符）`);
+    assert.equal(formatIntentNote(null), '', '空意图返回空串');
+  });
+  await t('buildVerifyArgs：文件类交付物 → verify 断言（json 加 json_valid）', () => {
+    const args = buildVerifyArgs(normalizeIntent({
+      deliverables: [{ path: 'a.txt' }, { path: 'b.json' }, { path: null, criterion: '答案' }]
+    }));
+    assert.equal(args.length, 2, '只取有路径的交付物');
+    assert.deepEqual(args[0].rules, [{ type: 'exists' }], '普通文件 exists');
+    assert.ok(args[1].rules.some(r => r.type === 'json_valid'), 'json 文件追加 json_valid');
+  });
+  await t('buildJudgePrompt：含契约/交付/硬断言 + 禁风格判断纪律', () => {
+    const intent = normalizeIntent({ task: 'T', acceptance: ['文件存在'] });
+    const p = buildJudgePrompt(intent, '最终交付内容……', ['a.txt：PASS 1/1']);
+    assert.ok(p.includes('意图契约') && p.includes('最终交付内容'), '两方证据注入');
+    assert.ok(p.includes('禁止风格与口味判断'), 'judge 纪律（防验证器误报）');
+    assert.ok(p.includes('PASS 或 GAPS'), '输出格式约束');
+  });
+  await t('parseVerdict：PASS / GAPS / 垃圾按 PASS（误报比漏报更有害）', () => {
+    assert.deepEqual(parseVerdict('{"verdict":"PASS","gaps":[]}').gaps, [], '标准 PASS');
+    const g = parseVerdict('```json\n{"verdict":"GAPS","gaps":["文件 c.txt 不存在","问题二未回答"]}\n```');
+    assert.equal(g.verdict, 'GAPS') && assert.equal(g.gaps.length, 2, '围栏 GAPS 解析');
+    assert.deepEqual(parseVerdict('模型胡言乱语'), { verdict: 'PASS', gaps: [] }, '垃圾按 PASS');
+    assert.deepEqual(parseVerdict('{"verdict":"GAPS","gaps":[]}'), { verdict: 'PASS', gaps: [] }, '空缺口 GAPS 视为 PASS');
+  });
+  await t('inner.js opts.intentNote：每轮发送副本注入意图契约（落盘干净）', async () => {
+    const origFetch = globalThis.fetch;
+    const bodies = [];
+    globalThis.fetch = async (u, init) => {
+      bodies.push(JSON.parse(init.body));
+      if (bodies.length === 1) return sseResponse([
+        JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'iv1', function: { name: 'read', arguments: '{"path":"f"}' } }] } }] }),
+        '[DONE]'
+      ]);
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: '完成' } }] }), '[DONE]']);
+    };
+    try {
+      const messages = [{ role: 'user', content: '干活' }];
+      await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, messages, [],
+        async () => 'ok', () => {},
+        { intentNote: () => '[意图契约] 测试注记' });
+      assert.ok(bodies.length === 2, '两轮调用');
+      assert.ok(String(bodies[1].messages.at(-1).content).includes('[意图契约] 测试注记'), '第二轮发送副本注入意图注记');
+      assert.ok(!messages.some(m => String(m.content || '').includes('[意图契约]')), '落盘 messages 保持干净');
+    } finally { globalThis.fetch = origFetch; }
+  });
+  await t('静态接线：server 意图闭环三段（抽取 / 注记 / 核验返修，v0.9.14）', () => {
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    assert.ok(/extractIntent\(cfg\.inner, message/.test(srv), '任务前抽取意图契约');
+    assert.ok(/intentNote,/.test(srv), 'intentNote 传入 chatInner 每轮注记');
+    assert.ok(/collectGaps/.test(srv) && /buildVerifyArgs\(intent\)/.test(srv), '交付核验（硬断言 + judge）');
+    assert.ok(/\[交付核验\] 对照意图契约发现以下未满足项/.test(srv), '缺口注入返修指令');
+    assert.ok(/MAX_REPAIR = 2/.test(srv), '返修上限 2 轮（防完美主义死循环）');
+    assert.ok(/unlinkSync\(intentPath\)/.test(srv), '换任务清除过期契约（防污染后续任务）');
+  });
+
   await t('计量采集：捕获 choices 空+usage 末帧（旧版此处被 continue 丢弃）', async () => {
     const origFetch = globalThis.fetch;
     const bodies = [];
