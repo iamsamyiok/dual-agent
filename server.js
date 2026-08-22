@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.18';
+const APP_VERSION = '0.9.19';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -471,9 +471,12 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
       if (isLongFormTask(message)) {
         finalMsg = message + '\n\n[框架提示] 本任务为长文创作任务，你必须用工具流完成，禁止以"超出输出能力/篇幅过长/轮数限制"为由拒绝或讨价还价。能力账本（算给你看）：框架轮数预算 72 轮（24 轮/段 × 3 段自动续航），每轮稳定输出 1000-1500 字符，万字只需 10-15 轮写入——预算绰绰有余，任何"单次输出上限"都不构成障碍。执行纪律：\n' +
           '1) 先规划章节：todo.add 每章一条（如"第一章 起势：冲突建立"），章节数按目标字数÷每章 600-800 字估算；\n' +
-          '2) 逐章写入文件：每章内部再分段——首次 write(path=文件名, content=本章第一段)，后续每段 write(同一路径, content=下一段, append=true)。每段 ≤1500 字符（API 流式传输对超大参数会截断，分段是硬要求，段与段不得重叠跳行）；append 的 content 必须以 \\n 开头（新起一段），章节标题（如 ## 第三章 xxx）必须独占一行，否则 markdown 渲染不出标题；\n' +
-          '3) 每完成一章 todo.toggle 勾选，再写下一章；全部章节完成后 verify 断言（exists + line_count + contains 关键情节词）；\n' +
-          '4) 最后输出交付说明：文件路径 + 章节目录 + 总字数估计。中途上下文被折叠属正常现象（[轮数预算]/[任务清单] 注记会告诉你进度），照常续写；\n' +
+          '2) 逐章写入文件：每章内部再分段——首次 write(path=文件名, content=本章第一段)，后续每段写之前必须先用 read(path=同一文件名, tail=N) 读取最后 N 字符（N=500，确认结尾段落）；append 续写时 content 必须以 \\n 开头（新起一段），章节标题（如 ## 第三章 xxx）必须独占一行，否则 markdown 渲染不出标题；\n' +
+          '2b) append 续写前上下文确认：每次 write append=true 之前，必须先 read 已写文件的最后 500 字符（tail 参数），确认新段与已有内容在情节/人物/时间线上连续；如发现断层或人物名字/地点不一致，先修复再续写；\n' +
+          '3) 每完成一章 todo.toggle 勾选，再写下一章；全部章节完成后 verify 断言（exists + line_count + contains 关键情节词 + regex: /^\#\# 第/ 检查每个章节标题独占一行）；' +
+          '3b) 字数验证：交付前用 bash 命令 `wc -m <文件名>` 获取真实字符数，写入交付说明；禁止自行估算字数（模型估算通常严重偏离真实值）；' +
+          '4) 最后输出交付说明：文件路径 + 章节目录 + 总字数（来自 wc -m，禁止估算）+ 已写章节数。中途上下文被折叠属正常现象（[轮数预算]/[任务清单] 注记会告诉你进度），照常续写；\n' +
+          '4b) 中途一致性检查点：每完成 3 章，暂停写入，用 bash `wc -m <文件名>` 记录当前字数，再用 memory.save(level="short", content="剧情摘要：当前章节 + 活跃人物 + 关键伏笔 + 时间线") 保存状态；下次 append 前 memory.search 召回确认情节连续性，避免人物/地点漂移；' +
           '5) 自主决策：章节划分、情节走向、文件名等细节自行合理决定并立即执行，禁止以提问/确认/给方案开局——用户要的是写好的成品文件。仅当目标超过 3 万字时，可先交付完整的前 1/3 章节并在文件中注明续写点。';
         send({ type: 'info', text: '检测到长文创作任务，已注入分章分段创作纪律' });
       }

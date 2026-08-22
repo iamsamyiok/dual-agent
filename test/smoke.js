@@ -1726,9 +1726,21 @@ async function main() {
     assert.ok(enforce > probeDef, '零写入强制重入在探针声明之后（否则永远 false）');
     assert.ok(/长文强制执行/.test(srv), '重入带独立 label 便于日志追踪');
   });
+  await t('静态防回归：长文创作纪律四条升级接线（v0.9.19：续写上下文+章节标题验证+字数精确+一致性检查点）', () => {
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    // P1: 续写上下文——append 前 read tail
+    assert.ok(/read\(.*tail/.test(srv), 'append 续写前必须 read 确认结尾上下文');
+    assert.ok(/2b\)/.test(srv), '续写上下文规则编号 2b 存在');
+    // P2: 章节标题验证
+    assert.ok(/regex.*章节标题|章节标题.*regex|regex.*独占一行/.test(srv), 'verify regex 检查章节标题独占一行');
+    // P3: 字数精确
+    assert.ok(/wc -m/.test(srv), '真实字数验证使用 wc -m');
+    assert.ok(/禁止.*估算|禁止自行估算/.test(srv), '明确禁止模型估算字数');
+    // P4: 中途一致性检查点
+    assert.ok(/每完成 3 章/.test(srv) || /每3章/.test(srv), '每 3 章插入一致性检查点');
+    assert.ok(/memory\.save.*剧情摘要|剧情摘要.*memory\.save/.test(srv), '一致性检查点包含剧情摘要 memory.save');
+  });
 
-
-  // ===== 文档上传与查看（v0.9.16 e2e）=====
   await t('上传：base64 JSON → uploads 落盘 + 重名加序号 + 非法名拒绝', async () => {
     const up = async (name, content) => {
       const r = await fetch(base + '/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, content: Buffer.from(content).toString('base64') }) });
