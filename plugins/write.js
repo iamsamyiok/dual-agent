@@ -35,7 +35,16 @@ module.exports = {
     required: ['path', 'content']
   },
   run: async (args, ctx) => {
-    const fp = path.resolve(ctx.cwd, String(args.path || ''));
+    // P0 修复：路径标准化——如果输入路径已包含工作区前缀，自动去除避免双重嵌套
+    let userPath = String(args.path || '');
+    if (ctx.cwd && userPath.startsWith(ctx.cwd)) {
+      // 绝对路径但包含 cwd，去掉前缀
+      userPath = userPath.slice(ctx.cwd.length);
+      if (userPath.startsWith('/') || userPath.startsWith('\\')) {
+        userPath = userPath.slice(1);
+      }
+    }
+    const fp = path.resolve(ctx.cwd, userPath);
     // 软失败一律 throw：框架据此标记失败并计入评审统计
     if (fs.existsSync(fp) && fs.statSync(fp).isDirectory()) {
       throw new Error(`${fp} 是目录，请提供完整文件路径（需包含文件名，如 game.html）`);

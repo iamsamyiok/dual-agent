@@ -16,7 +16,15 @@ module.exports = {
     required: ['path', 'oldText', 'newText']
   },
   run: async (args, ctx) => {
-    const fp = path.resolve(ctx.cwd, String(args.path || ''));
+    // P0 修复：路径标准化
+    let userPath = String(args.path || '');
+    if (ctx.cwd && userPath.startsWith(ctx.cwd)) {
+      userPath = userPath.slice(ctx.cwd.length);
+      if (userPath.startsWith('/') || userPath.startsWith('\\')) {
+        userPath = userPath.slice(1);
+      }
+    }
+    const fp = path.resolve(ctx.cwd, userPath);
     const src = fs.readFileSync(fp, 'utf8');
     const oldText = String(args.oldText ?? '');
     const newText = String(args.newText ?? '');

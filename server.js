@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.22';
+const APP_VERSION = '0.9.23';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -526,7 +526,7 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
     const needsIntent = multiStep || isLongFormTask(message);
     if (needsIntent) {
       send({ type: 'info', text: '多步/长文任务：抽取意图契约（目标 / 交付物 / 验收条款）' });
-      intent = await extractIntent(cfg.inner, message, { onEvent: send });
+      intent = await extractIntent(cfg.inner, message, { onEvent: send, wsDir: WS_DIR });
       if (intent) {
         try { fs.writeFileSync(intentPath, JSON.stringify(intent, null, 1), 'utf8'); } catch { /* 落盘失败不阻断 */ }
         send({ type: 'info', text: `意图契约已建立：交付物 ${intent.deliverables.length} 项 / 验收条款 ${intent.acceptance.length} 条（工作区 .intent.json）` });
