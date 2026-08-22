@@ -36,15 +36,28 @@ module.exports = {
   },
 
   run: async (args, ctx) => {
-    // P0 修复：路径标准化
+    // P0 修复：路径标准化（v0.9.25）
+    // 处理三种输入形态：
+    //   1) 相对路径 'sub/file.md'        → 直接使用
+    //   2) 带 cwd 前缀 '/abs/ws/file'    → 剥前缀
+    //   3) 绝对路径 '/file'（不属 cwd）  → 转相对；若 resolve 后仍越界则拒绝
     let userPath = String(args.path || '');
     if (ctx.cwd && userPath.startsWith(ctx.cwd)) {
       userPath = userPath.slice(ctx.cwd.length);
       if (userPath.startsWith('/') || userPath.startsWith('\\')) {
         userPath = userPath.slice(1);
       }
+    } else if (path.isAbsolute(userPath) && ctx.cwd) {
+      // 绝对路径但不在 cwd 内：尝试转相对路径
+      const rel = path.relative(ctx.cwd, userPath);
+      if (!rel.startsWith('..') && rel.length > 0) {
+        userPath = rel;
+      }
     }
     const fp = path.resolve(ctx.cwd, userPath);
+    if (!fp.startsWith(ctx.cwd + path.sep) && fp !== ctx.cwd) {
+      throw new Error(`路径越界：${args.path}（resolve 后 ${fp} 不在工作区内）`);
+    }
     const rules = Array.isArray(args.rules) ? args.rules : [];
     if (!rules.length) throw new Error('rules 为空（至少提供 1 条断言规则）');
 

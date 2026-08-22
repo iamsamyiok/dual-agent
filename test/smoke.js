@@ -304,6 +304,21 @@ async function main() {
     assert.ok(empty.includes('至少提供 1 条'), empty);
     assert.ok(/^插件 verify/.test(empty), '应被标记为失败调用：' + empty);
   });
+  await t('verify 插件：绝对路径自动转相对（根治 LLM 误用 /abs/path 场景）', async () => {
+    fs.writeFileSync(path.join(WS, 'vr-verify.txt'), 'alpha\nbeta\ngamma\n', 'utf8');
+    const abs = path.join(WS, 'vr-verify.txt');
+    // 之前 bug：LLM 给绝对路径会越界；修法后应自动转相对并成功读取
+    const r = await plugins.runPlugin('verify', { path: abs, rules: [{ type: 'contains', text: 'beta' }, { type: 'line_count', exact: 3 }] }, ctx);
+    assert.ok(r.includes('2/2 通过') && r.includes('PASS'), r);
+    // 子目录内文件也适用
+    fs.mkdirSync(path.join(WS, 'vr-sub'), { recursive: true });
+    fs.writeFileSync(path.join(WS, 'vr-sub', 'vr-inner.md'), 'inner content\n', 'utf8');
+    const r2 = await plugins.runPlugin('verify', { path: path.join(WS, 'vr-sub', 'vr-inner.md'), rules: [{ type: 'contains', text: 'inner' }] }, ctx);
+    assert.ok(r2.includes('PASS'), r2);
+    // 真正的越界仍应拒绝
+    const esc = await plugins.runPlugin('verify', { path: '/etc/passwd', rules: [{ type: 'exists' }] }, ctx);
+    assert.ok(/^插件 verify/.test(esc) && esc.includes('路径越界'), esc);
+  });
 
   // ===== v0.9.25 原子插件：stat / diff / query / calc / tree / archive / probe =====
   await t('stat 插件：单文件客观统计（CJK 口径）+ glob 汇总', async () => {
