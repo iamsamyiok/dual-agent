@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const core = require('./core');
+const { summarizeArgs, fmtDur } = require('./tui');
 
 const HELP = [
   '/help              显示本帮助',
@@ -12,6 +13,7 @@ const HELP = [
   '/reset             清空当前会话并清除意图契约',
   '/history           会话条数摘要与最近消息预览',
   '/usage             token 用量统计（本会话累计 + 历史分组）',
+  '/tools [序号]      最近插件调用折叠列表（带序号展开参数与结果详情）',
   '/memory [关键词]   检索工作区记忆',
   '/todo              查看任务清单',
   '/export [文件名]   导出当前会话为 Markdown（默认 hwj-export-<时间>.md）',
@@ -130,6 +132,31 @@ async function runCommand(line, ctx) {
         const out = await plugins.runPlugin('usage', { action: 'history' }, { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR });
         ui.printPlain(String(out));
       } catch (e) { ui.printError('用量查询失败：' + (e && e.message || e)); }
+      return 'handled';
+    }
+
+    case '/tools': {
+      const list = typeof ui.recentTools === 'function' ? ui.recentTools() : [];
+      if (!list.length) { ui.printInfo('当前会话暂无插件调用记录'); return 'handled'; }
+      const n = parseInt(arg, 10);
+      if (arg && Number.isFinite(n)) {
+        const it = list.find(x => x.seq === n);
+        if (!it) { ui.printError(`没有序号为 ${n} 的记录（/tools 查看列表）`); return 'handled'; }
+        ui.printPlain(`#${it.seq} ${it.ok ? '✓' : '✗'} ${it.plugin}${it.sub ? ' [子]' : ''} · ${fmtDur(it.ms)}`);
+        let argsStr = '';
+        try { argsStr = JSON.stringify(it.args); } catch { argsStr = String(it.args); }
+        ui.printPlain(`参数：${argsStr}`);
+        ui.printPlain('结果：');
+        const rows = String(it.result ?? '').split('\n').filter(l => l.trim());
+        for (const l of rows.slice(0, 20)) ui.printPlain(`  ${l.length > 160 ? l.slice(0, 160) + '…' : l}`);
+        if (rows.length > 20) ui.printPlain(`  …（共 ${rows.length} 行，完整内容见 process.md）`);
+        return 'handled';
+      }
+      const tail = list.slice(-8);
+      ui.printPlain(`最近插件调用（展示 ${tail.length}/${list.length} 条，/tools <序号> 展开详情）：`);
+      for (const it of tail) {
+        ui.printPlain(`  #${it.seq} ${it.ok ? '✓' : '✗'} ${it.plugin}${it.sub ? ' [子]' : ''} ${summarizeArgs(it.args)} · ${fmtDur(it.ms)}`);
+      }
       return 'handled';
     }
 

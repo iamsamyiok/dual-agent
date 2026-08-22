@@ -1,6 +1,8 @@
 // hwj TUI 渲染引擎 — readline + ANSI 转义序列，零依赖（仅 Node 内置）
-// 分区模型：消息流（append-only 沉降区）+ 活动区（状态栏/流式回复/工具行，事件驱动重绘）+ readline prompt（最底行）
-// text 事件是快照式覆盖（inner.js pendingText 语义），TUI 维护 replyBuf 整段替换重绘实现流式效果
+// 布局模型（自下而上）：readline prompt 行（最底）→ 活动区（状态栏/流式回复/运行中工具，事件驱动重绘，
+// 任务结束整体擦除）→ 沉降区（append-only 滚动区：用户消息、折叠工具行、最终回复）。
+// 关键不变量：活动区始终是 prompt 上方连续 lastN 行；任何沉降输出前先擦除活动区与 readline 回显，
+// 打印后活动区在沉降内容下方重新申请——滚动区永不被覆盖、无重复打印。
 const readline = require('readline');
 
 // ---------- 显示宽度（CJK 双宽感知） ----------
@@ -56,6 +58,14 @@ function fmtTokens(n) {
   if (v >= 10000) return (v / 1000).toFixed(1) + 'k';
   return String(v);
 }
+// 耗时格式化：950ms / 13.0s / 2m05s
+function fmtDur(ms) {
+  const v = Math.max(0, Number(ms) || 0);
+  if (v < 1000) return `${Math.round(v)}ms`;
+  if (v < 60000) return `${(v / 1000).toFixed(1)}s`;
+  const m = Math.floor(v / 60000), s = Math.round((v % 60000) / 1000);
+  return `${m}m${String(s).padStart(2, '0')}s`;
+}
 
 // ---------- 工具行 / 状态栏渲染（纯函数） ----------
 // 参数摘要：优先 path/command/query 等可读字段，单行压平
@@ -72,7 +82,7 @@ function summarizeArgs(args) {
 const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 // tool: { plugin, args, t0, done, ok, ms, sub, spin }（spin 为当前转圈字符）
 function renderToolLine(tool, width) {
-  const dur = tool.done ? `${tool.ms}ms` : `${Date.now() - tool.t0}ms`;
+  const dur = fmtDur(tool.done ? tool.ms : Date.now() - tool.t0);
   const icon = tool.done ? (tool.ok ? '✓' : '✗') : (tool.spin || SPINNER[0]);
   const head = ` ${icon} ${tool.sub ? '[子] ' : ''}${tool.plugin}`;
   const headW = strWidth(head);
@@ -80,11 +90,12 @@ function renderToolLine(tool, width) {
   const body = ellipsis(summarizeArgs(tool.args), Math.max(2, width - headW - durW));
   return { head, body, dur };
 }
-// 状态栏：hwj v0.9.28 · build · ws:default · 12.3k tok · 轮 3
+// 状态栏：hwj v0.9.28 · build · ws:default · 12.3k tok · 排队 2 · 执行中
 function renderStatusBar(st, width) {
   const parts = [`hwj ${st.version || ''}`.trim(), st.mode || 'build', `ws:${st.ws || 'default'}`];
   if (st.tokens) parts.push(`${fmtTokens(st.tokens.prompt + st.tokens.completion)} tok`);
   if (st.calls) parts.push(`${st.calls} calls`);
+  if (st.queueN) parts.push(`排队 ${st.queueN}`);
   if (st.busy) parts.push(st.busy);
   return ellipsis(parts.join(' · '), Math.max(4, width));
 }
@@ -92,16 +103,20 @@ function renderStatusBar(st, width) {
 // ---------- ANSI 帮助 ----------
 const A = {
   reset: '\x1b[0m', clearLine: '\x1b[2K\x1b[1G',
-  up: n => `\x1b[${n}A`, down: n => `\x1b[${n}B`,
+  up: n => (n > 0 ? `\x1b[${n}A` : ''),
+  down: n => (n > 0 ? `\x1b[${n}B` : ''),
   cyan: s => `\x1b[36m${s}\x1b[0m`, green: s => `\x1b[32m${s}\x1b[0m`,
   gray: s => `\x1b[90m${s}\x1b[0m`, dim: s => `\x1b[2m\x1b[33m${s}\x1b[0m`,
   red: s => `\x1b[31m${s}\x1b[0m`, bold: s => `\x1b[1m${s}\x1b[0m`
 };
+const PROMPT = '> ';
+const PROMPT_W = 2;
 
 // ---------- TUI 对象 ----------
-// opts: { onLine, onSigint, version, ws, mode, plain }（plain=非交互模式：无 ANSI 无重绘，e2e 用）
+// opts: { onLine, onSigint, version, ws, mode, plain, input, output }（plain=非交互模式：无 ANSI 无重绘，e2e 用）
 function createTui(opts = {}) {
-  const out = process.stdout;
+  const out = opts.output || process.stdout;
+  const input = opts.input || process.stdin;
   const plain = !!opts.plain;
   const st = {
     version: opts.version || '', ws: opts.ws || 'default', mode: opts.mode || 'build',
@@ -112,38 +127,77 @@ function createTui(opts = {}) {
   let spinTimer = null;
   let redrawQueued = false;
   let lastReplyDraw = 0;
+  let lastN = 0;     // 活动区已绘制行数（prompt 上方连续行）
+  let echoRows = 0;  // readline 回显占用的行数（用户刚输入未沉降时）
   let onLine = opts.onLine || (() => {});
   let onSigint = opts.onSigint || (() => {});
   const termWidth = () => Math.max(20, (out.columns || 80) - 1);
+  // 工具调用历史（/tools 展开用；只记完成态）
+  const toolHist = [];
+  let toolSeq = 0;
+  const REGION_TOOLS_MAX = 4;   // 活动区工具行上限，更早的完成行沉降折叠
+  const REGION_REPLY_MAX = 4;   // 流式回复预览行数（最终全文由 printAssistant 沉降一次）
 
   // ----- 消息流（沉降区，append-only） -----
   function printRaw(line) { out.write(line + '\n'); }
+
+  // 沉降打印：擦除活动区+回显 → 输出 → 活动区重新申请（连续调用时中间态不重绘，setImmediate 合并）
+  function settlePrint(fn) {
+    if (!rl) { fn(); return; }
+    eraseRows(lastN + echoRows);
+    lastN = 0; echoRows = 0;
+    fn();
+    queueRedraw();
+  }
+  // 擦除 cursor 上方 k 行（连同当前行清空），光标回到擦除区顶行——后续打印复用回收的空间，不留空隙
+  function eraseRows(k) {
+    if (!rl || k <= 0) return;
+    let buf = A.clearLine + A.up(k);
+    for (let i = 0; i < k; i++) {
+      buf += A.clearLine;
+      if (i < k - 1) buf += A.down(1);
+    }
+    buf += A.up(k - 1);
+    out.write(buf);
+  }
+
+  // 消息块：前缀只出现在首行（连续行裸文本，markdown 列表对齐不被缩进破坏）
   function printUser(text) {
     if (plain) { printRaw(`你  ${text}`); return; }
-    for (const l of wrapText(text, termWidth() - 4)) printRaw(A.cyan('你  ') + l);
+    const lines = wrapText(text, Math.max(10, termWidth() - 4));
+    settlePrint(() => {
+      printRaw(A.cyan('你 ') + lines[0]);
+      for (const l of lines.slice(1)) printRaw(l);
+    });
   }
   function printAssistant(text) {
-    if (plain) { printRaw(text); return; }
-    for (const l of wrapText(text, termWidth() - 4)) printRaw(A.green('hwj ') + l);
+    if (plain) { printRaw(String(text ?? '')); return; }
+    const lines = wrapText(String(text ?? ''), Math.max(10, termWidth() - 4));
+    settlePrint(() => {
+      printRaw('');
+      printRaw(A.green('hwj ') + lines[0]);
+      for (const l of lines.slice(1)) printRaw(l);
+      printRaw('');
+    });
   }
   function printInfo(text) {
     if (plain) { printRaw(`[info] ${text}`); return; }
-    for (const l of wrapText(text, termWidth() - 2)) printRaw(A.dim(' ' + l));
+    settlePrint(() => { for (const l of wrapText(text, termWidth() - 2)) printRaw(A.dim(' ' + l)); });
   }
   function printError(text) {
     if (plain) { printRaw(`[错误] ${text}`); return; }
-    for (const l of wrapText(text, termWidth() - 2)) printRaw(A.red('✗ ' + l));
+    settlePrint(() => { for (const l of wrapText(text, termWidth() - 2)) printRaw(A.red('✗ ' + l)); });
   }
-  function printPlain(text) { printRaw(plain ? text : A.gray(text)); }
+  function printPlain(text) { settlePrint(() => printRaw(plain ? text : A.gray(text))); }
 
   // ----- 活动区行集合 -----
   function activeLines() {
     const w = termWidth();
     const lines = [plain ? renderStatusBar(st, w) : A.gray(renderStatusBar(st, w))];
     if (st.reply) {
-      const wrapped = wrapText(st.reply, w - 4);
-      const shown = wrapped.length > 12 ? ['…', ...wrapped.slice(-12)] : wrapped; // 流式回复只显示尾部，防滚动
-      for (const l of shown) lines.push(plain ? l : A.green('hwj ') + l);
+      const wrapped = wrapText(st.reply, w - 2);
+      const shown = wrapped.length > REGION_REPLY_MAX ? ['…', ...wrapped.slice(-REGION_REPLY_MAX)] : wrapped;
+      for (const l of shown) lines.push(A.green(l));
     }
     for (const t of st.tools) {
       const { head, body, dur } = renderToolLine(t, w);
@@ -157,33 +211,28 @@ function createTui(opts = {}) {
   }
 
   // ----- 活动区重绘 -----
-  // 光标模型：当前位于 readline prompt 行。清 prompt 行 → 上移 n 行 → 逐行清写 → 回到 prompt 行重绘 prompt
+  // 光标模型：当前位于 readline prompt 行。增长时先吸收 prompt 下方空行（或滚动），
+  // 再从 prompt 行上移 clearN=max(旧,新) 行逐行清写——旧多新少时清除残影，绝不覆盖沉降区。
   function redraw() {
-    if (plain) { // 非交互：活动区直接顺序打印（工具行 done 时打印一行）
-      for (const t of st.tools) if (t._printed !== true) {
-        t._printed = true;
-        const { head, body, dur } = renderToolLine(t, 200);
-        printRaw(`${head} ${body} ${dur}${t.done ? '' : ' …'}`);
-      }
-      if (st.reply) { st._printedReply = st.reply; }
-      return;
-    }
-    if (!rl) return;
+    if (plain || !rl) return;
     const lines = activeLines();
     const n = lines.length;
-    let buf = A.clearLine;
-    if (n > 0) buf += A.up(n);
-    for (let i = 0; i < n; i++) {
-      buf += A.clearLine + lines[i];
-      if (i < n - 1) buf += '\x1b[1B';
+    if (n > lastN) out.write('\n'.repeat(n - lastN));
+    const clearN = Math.max(lastN, n);
+    let buf = A.clearLine + A.up(clearN);
+    for (let i = 0; i < clearN; i++) {
+      buf += A.clearLine;
+      if (i < n) buf += lines[i];
+      if (i < clearN - 1) buf += A.down(1);
     }
-    if (n > 0) buf += '\n';
+    buf += '\n';
+    lastN = n;
     out.write(buf);
     rl.prompt(true);
   }
   // 合并高频重绘（text 流式/usage 每轮多次，逐事件全量重绘浪费且闪烁）
   function queueRedraw() {
-    if (plain) { redraw(); return; }
+    if (plain) return;
     if (redrawQueued) return;
     redrawQueued = true;
     setImmediate(() => { redrawQueued = false; redraw(); });
@@ -194,6 +243,31 @@ function createTui(opts = {}) {
     if (Date.now() - lastReplyDraw >= 60) { lastReplyDraw = Date.now(); queueRedraw(); }
   }
 
+  // ----- 折叠工具行（沉降区） -----
+  // 完成态一行折叠：` ✓ search 惠州天气 · 13.0s`；失败追加一行灰色错误摘要
+  function printSettledTool(t) {
+    const w = termWidth();
+    const { head, body, dur } = renderToolLine(t, w);
+    const pad = Math.max(0, w - strWidth(head) - strWidth(dur) - 1);
+    if (plain) {
+      printRaw(`${head} ${body} ${dur}${t.done ? '' : '（未完成）'}`);
+    } else {
+      const headStr = t.done ? (t.ok ? A.green(head) : A.red(head)) : A.gray(head);
+      printRaw(`${headStr} ${A.gray(ellipsis(body, pad))} ${A.gray(dur)}`);
+    }
+    if (t.done && !t.ok && t.result != null) {
+      const first = String(t.result).split('\n').find(l => l.trim()) || '';
+      if (first) printRaw(plain ? `   ↳ ${ellipsis(first, Math.max(4, w - 6))}` : A.gray(`   ↳ ${ellipsis(first, Math.max(4, w - 6))}`));
+    }
+  }
+  // 活动区工具行超限时，把最早已完成的一行沉降（长任务增量反馈，避免结束时堆积）
+  function settleOverflow() {
+    if (plain) return;
+    let spilled = null;
+    while (st.tools.length > REGION_TOOLS_MAX && st.tools[0].done) (spilled ||= []).push(st.tools.shift());
+    if (spilled) settlePrint(() => { for (const t of spilled) printSettledTool(t); });
+  }
+
   // ----- 任务生命周期 -----
   function beginTask() {
     st.reply = ''; st.tools = []; st.busy = '执行中';
@@ -202,38 +276,30 @@ function createTui(opts = {}) {
   }
   function endTask() {
     stopSpin();
-    // 活动区沉降：工具行以静态形态进入消息流；回复文本由调用方以 finalText 统一打印
-    //（活动区 reply 只是流式预览，最终交付可能含核验缺口标注等后处理，以 core 返回为准）
-    for (const t of st.tools) {
-      const { head, body, dur } = renderToolLine(t, termWidth());
-      const headStr = t.done ? (t.ok ? A.green(head) : A.red(head)) : A.gray(head);
-      printRaw(`${headStr} ${A.gray(ellipsis(body, Math.max(0, termWidth() - strWidth(head) - strWidth(dur) - 1)))} ${A.gray(dur)}`);
-    }
+    const tools = st.tools.slice();
     st.reply = ''; st.tools = []; st.busy = '';
-    queueRedraw();
+    // 活动区整体擦除后一次性沉降：工具折叠行（此前未沉降的）+ 回复由调用方 printAssistant 沉降
+    settlePrint(() => { for (const t of tools) { if (!t._p) { t._p = true; printSettledTool(t); } } });
   }
   function toolCall(ev) {
     st.tools.push({ plugin: ev.plugin, args: ev.args, t0: Date.now(), done: false, ok: false, ms: 0, sub: !!ev.sub });
-    // 工具行数保护：超过 8 行时最早完成的行沉降（保留未完成行供就地更新）
-    if (st.tools.length > 8) {
-      const settle = [];
-      while (st.tools.length > 8 && st.tools[0].done) settle.push(st.tools.shift());
-      for (const t of settle) {
-        const { head, body, dur } = renderToolLine(t, termWidth());
-        printRaw(`${A.gray(head)} ${A.gray(ellipsis(body, Math.max(0, termWidth() - strWidth(head) - strWidth(dur) - 1)))} ${A.gray(dur)}`);
-      }
-    }
+    settleOverflow();
     queueRedraw();
   }
   function toolResult(ev) {
-    // 子级事件与主级按 plugin+t0 就近匹配；无 id 语义，取最后一个同名未完成行
+    // 子级事件与主级按 plugin 就近匹配；无 id 语义，取最后一个同名未完成行
     for (let i = st.tools.length - 1; i >= 0; i--) {
       const t = st.tools[i];
       if (t.plugin === ev.plugin && !t.done) {
-        t.done = true; t.ok = !!ev.ok; t.ms = ev.ms || (Date.now() - t.t0);
+        t.done = true; t.ok = !!ev.ok; t.ms = ev.ms || (Date.now() - t.t0); t.result = ev.result;
+        toolSeq += 1;
+        toolHist.push({ seq: toolSeq, plugin: t.plugin, args: t.args, ok: t.ok, ms: t.ms, sub: t.sub, result: String(ev.result ?? '') });
+        if (toolHist.length > 40) toolHist.shift();
         break;
       }
     }
+    if (plain) { for (const t of st.tools) if (t.done && !t._p) { t._p = true; printSettledTool(t); } }
+    settleOverflow();
     queueRedraw();
   }
   function usage(ev) {
@@ -258,10 +324,13 @@ function createTui(opts = {}) {
   function stopSpin() { if (spinTimer) { clearInterval(spinTimer); spinTimer = null; } }
 
   // ----- readline -----
+  function estimateEcho(line) {
+    return Math.max(1, Math.ceil((PROMPT_W + strWidth(line)) / termWidth()));
+  }
   function start() {
     if (plain) return;
-    rl = readline.createInterface({ input: process.stdin, output: out, prompt: A.bold('> ') });
-    rl.on('line', line => { onLine(line); });
+    rl = readline.createInterface({ input, output: out, prompt: A.bold(PROMPT) });
+    rl.on('line', line => { echoRows = estimateEcho(line); onLine(line); });
     let sigintCount = 0; let sigintTs = 0;
     rl.on('SIGINT', () => {
       const now = Date.now();
@@ -269,17 +338,20 @@ function createTui(opts = {}) {
       sigintTs = now; sigintCount += 1;
       onSigint(sigintCount);
     });
-    out.on('resize', () => queueRedraw());
+    out.on('resize', () => { lastN = 0; queueRedraw(); });
     rl.prompt();
   }
   function setHandlers(h) { if (h.onLine) onLine = h.onLine; if (h.onSigint) onSigint = h.onSigint; }
-  function refreshPrompt() { if (rl) rl.prompt(true); }
+  function refreshPrompt() { if (rl) rl.prompt(true); queueRedraw(); }
   function clearPromptLine() { if (!plain) out.write(A.clearLine); }
   function close() {
     stopSpin();
     if (rl) { rl.close(); rl = null; }
   }
-  return { printUser, printAssistant, printInfo, printError, printPlain, beginTask, endTask, setReply, toolCall, toolResult, usage, setMeta, start, setHandlers, refreshPrompt, clearPromptLine, close, state: st };
+  function recentTools() { return toolHist.map(t => ({ ...t, args: safeClone(t.args) })); }
+  function safeClone(a) { try { return JSON.parse(JSON.stringify(a ?? null)); } catch { return { ...String(a) }; } }
+
+  return { printUser, printAssistant, printInfo, printError, printPlain, beginTask, endTask, setReply, toolCall, toolResult, usage, setMeta, start, setHandlers, refreshPrompt, clearPromptLine, close, recentTools, state: st };
 }
 
-module.exports = { createTui, wrapText, ellipsis, strWidth, charWidth, renderToolLine, renderStatusBar, summarizeArgs, fmtTokens, SPINNER };
+module.exports = { createTui, wrapText, ellipsis, strWidth, charWidth, renderToolLine, renderStatusBar, summarizeArgs, fmtTokens, fmtDur, SPINNER };

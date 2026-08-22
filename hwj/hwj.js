@@ -10,6 +10,7 @@ const PKG = require('../package.json');
 const args = process.argv.slice(2);
 function argOf(flag) { const i = args.indexOf(flag); return i >= 0 && i + 1 < args.length ? args[i + 1] : null; }
 const SCRIPT_MSG = argOf('--script');
+const QUIET = args.includes('--quiet'); // hwj run -q 安静模式：仅最终结果→stdout，错误→stderr
 const WS_ARG = argOf('--ws');
 const INTERACTIVE = !SCRIPT_MSG && process.stdin.isTTY && process.stdout.isTTY;
 
@@ -19,6 +20,16 @@ const BANNER = [
 ];
 
 function quit(code) { process.exit(code); }
+
+// 安静模式 UI：过程全部静默，最终结果→stdout，错误→stderr（供 hwj run -q 管道/脚本使用）
+function quietUi() {
+  return {
+    printUser() {}, beginTask() {}, endTask() {}, setReply() {}, toolCall() {}, toolResult() {},
+    usage() {}, setMeta() {}, printInfo() {}, printPlain() {}, close() {},
+    printAssistant: t => process.stdout.write(String(t ?? '') + '\n'),
+    printError: t => process.stderr.write(String(t ?? '') + '\n')
+  };
+}
 
 async function main() {
   core.getConfig(); // 触发目录创建
@@ -32,7 +43,7 @@ async function main() {
       console.error('hwj 需要在终端（TTY）中交互运行；批量执行用 --script "消息"');
       quit(2);
     }
-    const ui = createTui({ plain: true, ws, mode, version: PKG.version });
+    const ui = QUIET ? quietUi() : createTui({ plain: true, ws, mode, version: PKG.version });
     const ctx = { ws, mode, ui, abort: () => false };
     ui.printUser(SCRIPT_MSG);
     ui.beginTask();

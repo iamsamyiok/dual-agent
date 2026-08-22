@@ -30,18 +30,27 @@ function assertPairSafe(messages) {
 
 async function main() {
   console.log(`\n[1/3] 语法检查 + 启动脚本静态断言`);
-  const hwjFiles = fs.readdirSync(path.join(ROOT, 'hwj')).map(f => path.join(ROOT, 'hwj', f)).filter(f => f.endsWith('.js'));
+  const hwjFiles = [...fs.readdirSync(path.join(ROOT, 'hwj')).map(f => path.join(ROOT, 'hwj', f)), path.join(ROOT, 'bin', 'hwj.js')].filter(f => f.endsWith('.js'));
   await t(`node --check ${hwjFiles.length} 个 hwj JS 文件`, () => {
     for (const f of hwjFiles) execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' });
   });
-  await t('hwj.bat：WSL 探测 + wslpath 映射 + exec 启动链完整', () => {
+  await t('hwj.bat：本机 Node 优先 + WSL 降级探测链完整', () => {
     const bat = fs.readFileSync(path.join(ROOT, 'hwj.bat'), 'utf8');
-    assert.ok(bat.includes('where wsl'), '应探测 wsl');
+    assert.ok(bat.includes('where node'), '应优先探测本机 Node');
+    assert.ok(bat.includes('bin\\hwj.js'), '应经统一入口调度器启动');
+    assert.ok(bat.includes('wsl.exe -e /bin/true'), 'WSL 探测应实测可用性（而非仅 where wsl）');
     assert.ok(bat.includes('wslpath -a'), '应用 wslpath 映射双击位置');
-    assert.ok(bat.includes('exec node hwj/hwj.js'), '应 exec 启动 hwj');
+    assert.ok(bat.includes('exec node bin/hwj.js'), 'WSL 降级应 exec 调度器');
     assert.ok(bat.includes('chcp 65001'), '应设置 UTF-8 代码页');
     assert.ok(bat.includes('HWJ_HOME'), '应支持 HWJ_HOME 覆盖');
     assert.ok(bat.includes('setup_20.x'), 'Node 缺失时应给 NodeSource 安装指引');
+    assert.ok(bat.includes('_choose'), '双击应经 Node 输出选择菜单（规避 cmd UTF-8 解析坑）');
+    assert.ok(bat.includes('__tempsession'), '应支持临时会话分支');
+  });
+  await t('调度器：双击菜单文案与临时会话提示（中文经 Node 输出）', () => {
+    const disp = fs.readFileSync(path.join(ROOT, 'bin', 'hwj.js'), 'utf8');
+    assert.ok(disp.includes('永久安装') && disp.includes('临时使用') && disp.includes('直接启动'), '菜单应含三个选项');
+    assert.ok(disp.includes('关窗即失效'), '临时使用应说明关窗即失效');
   });
   await t('hwj.command：node 探测 + 版本校验 + exec 启动', () => {
     const sh = fs.readFileSync(path.join(ROOT, 'hwj.command'), 'utf8');
@@ -92,11 +101,115 @@ async function main() {
     const bad = renderToolLine({ plugin: 'write', args: {}, t0: Date.now(), done: true, ok: false, ms: 10 }, w);
     assert.ok(bad.head.startsWith(' ✗'));
   });
-  await t('renderStatusBar：模式/工作区/token 组装', () => {
+  await t('renderStatusBar：模式/工作区/token/排队组装', () => {
     const s = renderStatusBar({ version: '0.9.28', mode: 'plan', ws: 'test-ws', tokens: { prompt: 9000, completion: 2500 }, calls: 3, busy: '' }, 80);
     assert.ok(s.includes('plan') && s.includes('ws:test-ws') && s.includes('11.5k tok'));
     const s2 = renderStatusBar({ version: '0.9.28', mode: 'build', ws: 'default' }, 80);
     assert.ok(s2.includes('build'));
+    const s3 = renderStatusBar({ version: '0.9.28', mode: 'build', ws: 'default', queueN: 2 }, 80);
+    assert.ok(s3.includes('排队 2'));
+  });
+
+  // ---- TUI 屏幕渲染：VT 模拟器驱动完整交互流，断言折叠/单前缀/无重复/回显吸收 ----
+  const { PassThrough } = require('stream');
+  const { createTui, SPINNER } = require(path.join(ROOT, 'hwj', 'tui.js'));
+  function makeScreen(rows, cols) {
+    const grid = Array.from({ length: rows }, () => new Array(cols).fill(' '));
+    let r = 0, c = 0;
+    const scroll = () => { grid.shift(); grid.push(new Array(cols).fill(' ')); r = rows - 1; };
+    return {
+      write(chunk) {
+        const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
+        let i = 0;
+        while (i < s.length) {
+          const ch = s[i];
+          if (ch === '\x1b' && s[i + 1] === '[') {
+            let j = i + 2;
+            while (j < s.length && /[0-9;?]/.test(s[j])) j++;
+            const n = parseInt((s.slice(i + 2, j) || '1').split(';')[0], 10) || 1;
+            const cmd = s[j]; j++;
+            if (cmd === 'A') r = Math.max(0, r - n);
+            else if (cmd === 'B') r = Math.min(rows - 1, r + n);
+            else if (cmd === 'K') grid[r].fill(' ');
+            else if (cmd === 'G') c = n - 1;
+            else if (cmd === 'J') { if (n === 2) { for (const row of grid) row.fill(' '); r = 0; c = 0; } else { for (let rr = r; rr < rows; rr++) grid[rr].fill(' '); } }
+            else if (cmd === 'H') { r = 0; c = 0; }
+            i = j;
+          } else if (ch === '\n') { if (r === rows - 1) scroll(); else r++; c = 0; i++; }
+          else if (ch === '\r') { c = 0; i++; }
+          else {
+            const cp = ch.codePointAt(0);
+            const len = cp > 0xffff ? 2 : 1;
+            if (c < cols) grid[r][c] = ch;
+            c = Math.min(c + len, cols - 1);
+            i += len;
+          }
+        }
+      },
+      text() { return grid.map(row => row.join('').replace(/\s+$/, '')).join('\n'); }
+    };
+  }
+  const flushTick = () => new Promise(res => setImmediate(res));
+  function makeFakeTui(onLine) {
+    const input = new PassThrough(), output = new PassThrough();
+    output.columns = 100; output.rows = 24; output.isTTY = true; input.isTTY = true;
+    const screen = makeScreen(24, 100);
+    output.on('data', d => screen.write(d));
+    const ui = createTui({ input, output, ws: 'default', mode: 'build', version: '0.9.28', onLine: onLine || (() => {}) });
+    ui.start();
+    return { ui, input, screen };
+  }
+  await t('TUI 屏幕渲染：折叠工具行/首行前缀/回显吸收/无重复', async () => {
+    const { ui, input, screen } = makeFakeTui(line => { if (line.trim()) { ui.printUser(line); ui.beginTask(); } });
+    await flushTick();
+    input.write('查一下惠州今天天气\n');
+    await flushTick();
+    ui.toolCall({ plugin: 'search', args: { query: '惠州天气今日实时' } });
+    await flushTick();
+    ui.toolResult({ plugin: 'search', ok: true, ms: 12973, result: '中国天气网：雷阵雨 26-34℃' });
+    ui.toolCall({ plugin: 'fetch', args: { url: 'https://www.weather.com.cn/x' } });
+    await flushTick();
+    ui.setReply('惠州今日雷阵雨，气温 26℃ ~ 34℃，降水概率 74%，闷热潮湿。');
+    await new Promise(res => setTimeout(res, 80));
+    ui.toolResult({ plugin: 'fetch', ok: false, ms: 10654, result: '抓取失败：连接超时\nETIMEDOUT 20.3s' });
+    await flushTick();
+    ui.endTask();
+    ui.printAssistant('惠州天气联网查询结果汇总：\n\n**今日（8月22日 周六）**\n- 天气：雷阵雨\n- 气温：26℃ ~ 34℃\n\n**总结**：出行请备雨具。');
+    await flushTick();
+    ui.usage({ totals: { prompt: 32000, completion: 2400, calls: 3 } });
+    await flushTick();
+    const lines = screen.text().split('\n');
+    const count = sub => lines.filter(l => l.includes(sub)).length;
+    assert.strictEqual(count('你 查一下惠州今天天气'), 1, '用户块应恰好一次');
+    assert.strictEqual(count('> 查一下'), 0, 'readline 回显应被吸收');
+    assert.strictEqual(count('✓ search'), 1, '成功工具折叠行恰好一次（无区域残留重复）');
+    assert.strictEqual(count('✗ fetch'), 1, '失败工具折叠行恰好一次');
+    assert.strictEqual(count('↳'), 1, '失败应附错误摘要行');
+    assert.strictEqual(count('hwj 惠州天气联网查询结果汇总'), 1, '回复前缀仅首行');
+    assert.strictEqual(count('hwj - 天气：雷阵雨'), 0, '续行不应有 hwj 前缀');
+    assert.strictEqual(count('- 天气：雷阵雨'), 1, '续行内容恰好一次');
+    assert.strictEqual(count('**总结**：出行请备雨具'), 1, '流式预览不应残留重复');
+    assert.ok(!SPINNER.split('').some(s => screen.text().includes(s)), '转圈字符应全部擦除');
+    assert.ok(lines.some(l => l.includes('34.4k tok')), '状态栏应显示 token 统计');
+    const hist = ui.recentTools();
+    assert.strictEqual(hist.length, 2);
+    assert.ok(hist[0].ok === true && hist[1].ok === false && hist[1].result.includes('ETIMEDOUT'));
+  });
+  await t('TUI 屏幕渲染：工具超限增量沉降（长任务不丢行）', async () => {
+    const { ui, screen } = makeFakeTui();
+    ui.printUser('多工具任务');
+    ui.beginTask();
+    for (let i = 1; i <= 6; i++) {
+      ui.toolCall({ plugin: 'read', args: { path: `f${i}.txt` } });
+      await flushTick();
+      ui.toolResult({ plugin: 'read', ok: true, ms: i * 100, result: `content-${i}` });
+      await flushTick();
+    }
+    ui.endTask();
+    await flushTick();
+    const lines = screen.text().split('\n');
+    for (let i = 1; i <= 6; i++) assert.strictEqual(lines.filter(l => l.includes(`✓ read f${i}`)).length, 1, `工具 f${i} 折叠行应恰好一次`);
+    assert.strictEqual(ui.recentTools().length, 6);
   });
 
   // 持久化（core）：独立环境变量隔离
@@ -187,6 +300,40 @@ async function main() {
     assert.ok(!md.includes('sys'), 'system 提示不应导出');
   });
 
+  // ---- 调度器（bin/hwj.js）：路由 / 退出码 / run 透传 / install dry-run ----
+  const PKG = require(path.join(ROOT, 'package.json'));
+  const runDisp = (args, extraEnv = {}, opts = {}) => new Promise((resolve) => {
+    const { spawn } = require('child_process');
+    const p = spawn(process.execPath, [path.join(ROOT, 'bin', 'hwj.js'), ...args], {
+      env: { ...ENV, DUAL_AGENT_MOCK: '1', ...extraEnv },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(opts.cwd ? { cwd: opts.cwd } : {})
+    });
+    let out = '', err = '';
+    p.stdout.on('data', d => out += d); p.stderr.on('data', d => err += d);
+    p.on('close', code => resolve({ code, out, err }));
+  });
+  await t('调度器：help/version/未知命令退出码', async () => {
+    const h = await runDisp(['help']);
+    assert.strictEqual(h.code, 0);
+    assert.ok(h.out.includes('hwj run') && h.out.includes('hwj gui') && h.out.includes('install'));
+    const v = await runDisp(['version']);
+    assert.strictEqual(v.code, 0);
+    assert.ok(v.out.includes(PKG.version));
+    const bad = await runDisp(['nosuch']);
+    assert.strictEqual(bad.code, 2);
+    assert.ok(bad.err.includes('未知命令'));
+  });
+  await t('调度器：run 缺提示词 → 用法错误 2', async () => {
+    const r = await runDisp(['run']);
+    assert.strictEqual(r.code, 2);
+  });
+  await t('调度器：install --dry-run 不落盘', async () => {
+    const r = await runDisp(['install', '--dry-run']);
+    assert.strictEqual(r.code, 0);
+    assert.ok(r.out.includes('[dry-run]'));
+  });
+
   console.log(`\n[3/3] e2e（MOCK 模式，--script 批处理）`);
   const runScript = (msg, extraEnv = {}) => new Promise((resolve) => {
     const { spawn } = require('child_process');
@@ -239,6 +386,27 @@ async function main() {
     const code = await new Promise(r => p.on('close', r));
     assert.strictEqual(code, 0, `stderr: ${err}`);
     assert.ok(fs.existsSync(path.join(ENV.DUAL_AGENT_WS_ROOT, 'ws-x', 'hwj-messages.json')));
+  });
+  await t('调度器 run：mock 任务全流程（透传 --ws + 工具行 + 会话落盘）', async () => {
+    const r = await runDisp(['run', '--ws', 'disp-e2e', '创建文件 demo.txt 内容为测试']);
+    assert.strictEqual(r.code, 0, `stderr: ${r.err}`);
+    assert.ok(r.out.includes('✓'), '应有工具折叠行');
+    assert.ok(r.out.includes('演示模式执行完成'));
+    assert.ok(fs.existsSync(path.join(ENV.DUAL_AGENT_WS_ROOT, 'disp-e2e', 'hwj-messages.json')));
+  });
+  await t('调度器 run -q：安静模式仅输出最终结果', async () => {
+    const r = await runDisp(['run', '--quiet', '--ws', 'disp-q', '创建文件 demo.txt 内容为测试']);
+    assert.strictEqual(r.code, 0, `stderr: ${r.err}`);
+    assert.ok(!r.out.includes('✓'), '不应有工具行');
+    assert.ok(!r.out.includes('你 '), '不应有回显行');
+    assert.ok(r.out.includes('演示模式执行完成'));
+  });
+  await t('调度器 run：跨目录调用自动注入调用上下文', async () => {
+    const r = await runDisp(['run', '--ws', 'ctx-e2e', '测试任务'], {}, { cwd: TMP });
+    assert.strictEqual(r.code, 0, `stderr: ${r.err}`);
+    const sess = JSON.parse(fs.readFileSync(path.join(ENV.DUAL_AGENT_WS_ROOT, 'ctx-e2e', 'hwj-messages.json'), 'utf8'));
+    const userText = sess.filter(m => m.role === 'user').map(m => String(m.content)).join('\n');
+    assert.ok(userText.includes('调用上下文') && userText.includes('hwj-smoke'), '应注入用户所在目录上下文');
   });
   await t('未配置 API（非 MOCK）：清晰报错退出码 1', async () => {
     fs.writeFileSync(core.CONFIG_PATH, JSON.stringify({ inner: { base_url: '', api_key: '', model: '' } }));

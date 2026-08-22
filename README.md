@@ -8,19 +8,59 @@
 内层 Agent 完整能力的终端封装（类 opencode TUI 形态，零依赖）：双击即用、双模式、意图闭环。
 
 ```
-Windows：双击 hwj.bat → 自动经 WSL 启动终端智能体
-macOS/Linux：双击 hwj.command（或在终端 ./hwj.command）
+安装（一次）：双击 install.bat   # 或 node bin\hwj.js install，装入用户 PATH，任意目录可用
+
+hwj                    # 终端交互（同 hwj tui；--ws 指定工作区）
+hwj gui                # Web 界面（自动挑端口 3788-3796；已在跑直接开浏览器）
+hwj run "创建文件 hello.txt 写入问候语"   # 非交互单次任务：过程+结果，退出码 0/1
+hwj run -q "…"          # 安静模式：仅输出最终结果（脚本/管道友好）
+echo 任务 | hwj run -   # 提示词从 stdin 读入
+hwj help                # 全部命令
 
 终端内：
-> 创建文件 hello.txt 写入问候语        # 直接下任务：工具流执行 + 意图核验
 > /mode plan                          # 只读分析模式（拦截 write/edit）
-> /help                               # 全部 13 个命令
+> /tools                              # 查看折叠的插件调用（/tools 3 展开详情）
+> /help                               # 全部 14 个命令
+
+卸载：hwj uninstall（或双击 uninstall.bat）
+未安装时：Windows 双击 hwj.bat（菜单：1 永久安装 / 2 临时使用 / 3 直接启动）；macOS/Linux 双击 hwj.command
 ```
 
+安装原理：往 `%LOCALAPPDATA%\Microsoft\WindowsApps`（默认已在用户 PATH、用户可写）写入 hwj.cmd 指向仓库调度器
+`bin/hwj.js`——零管理员权限、不改注册表、已打开的终端立即生效；仓库移动后在新目录重跑 install 即可。
+
+## 数据存储位置（集中式）
+
+在**任意目录**运行 hwj（tui/gui/run），所有数据都集中保存在**安装目录**内，不在调用目录留任何文件：
+
+| 数据 | 位置（安装目录内） |
+|---|---|
+| API 配置（与网页版共享） | `.data/config.json` |
+| 会话 / 记忆 / 技能 / 任务清单 | `workspaces/<工作区>/`（如 `hwj-messages.json`） |
+| 过程留痕（每次调用的完整入参与结果） | `workspaces/<工作区>/process.md` |
+| 内层调用日志 / 审计 | `.data/inner-log.jsonl`、`.data/audit.json` |
+| 任务产出的文件（bash/写文件默认沙箱） | `workspaces/<工作区>/` |
+
+好处：三端（tui/gui/run）共享同一套工作区与记忆，备份/清理只需处理安装目录，不会在用户各处目录里散落文件。
+在任意目录执行 `hwj run "…"` 时，框架会自动把**调用目录**注入任务上下文，Agent 可用绝对路径直接操作你所在目录的文件。
+
 特性：与网页版共享 API 配置（`.data/config.json`）与任务域（记忆/技能/清单/过程留痕），
+三种入口共享同一套工作区：`hwj run` 的结果可在 `hwj tui` 里 `/history` 回看，网页版同样可见；
 会话独立落盘（`workspaces/<ws>/hwj-messages.json`）互不污染；任务中断（Ctrl+C）保留已完成轮次；
+终端显示专为长任务优化：插件调用实时转圈、完成即折叠为一行（失败附错误摘要），流式回复只在预览区滚动、
+最终一次性沉降（首行 hwj 前缀，续行无前缀），`/tools [序号]` 随时展开任意调用的参数与结果详情；
 支持排队（≤5 条）、多工作区（`--ws`）、会话导出、MOCK 演示（`DUAL_AGENT_MOCK=1`）。
-详细设计见主仓 `.monkeycode/specs/2026-08-22-hwj-terminal-agent/`。
+详细设计见 `docs/specs/2026-08-22-hwj-terminal-agent/`。
+
+## 下载与安装（Release 用户）
+
+1. 下载并解压 `dual-agent-<版本>.zip`（如 `dual-agent-0.9.29.zip`）
+2. 双击 `install.bat` —— 将 `hwj` 命令装入用户 PATH（无需管理员、不改注册表），任意目录可用
+3. 首次使用：终端输入 `hwj` 按引导配置内层 API；或双击 `demo.bat` 免配置体验完整流程
+
+所有数据（API 配置、会话、记忆）保存在解压目录内，卸载双击 `uninstall.bat` 即可。
+不想安装也可直接双击：`hwj.bat`（出现选择菜单：**1 永久安装（默认）/ 2 临时使用（专用窗口，关窗即失效、不留文件）/ 3 直接启动**）、
+`start.bat`（Web 版）、`demo.bat`（演示）。
 
 ## 快速开始
 
@@ -182,3 +222,18 @@ node test/smoke.js
 | DUAL_AGENT_DATA / DUAL_AGENT_PLUGINS_DIR / DUAL_AGENT_WS_ROOT | 数据/插件/工作区目录覆盖（测试隔离用） |
 
 Windows 注意：npm 全局安装的 opencode 是 `.cmd` 垫片，程序会自动从 `where` 结果中优先选择可执行垫片并以 shell 方式启动；若仍失败，用 `DUAL_AGENT_OPENCODE_CMD` 指定完整路径。bash 插件在 Windows 下自动先切 UTF-8 代码页（`chcp 65001`）防中文乱码。
+
+## 发布打包（维护者）
+
+```
+双击 release.bat          # 或 node tools/release.js
+node tools/release.js --check   # 仅安全自检
+node tools/release.js --list    # 查看白名单
+```
+
+产物 `dist/dual-agent-<版本>.zip`（约 700KB，零依赖）。采用**白名单机制**：只有显式列入
+`tools/release.js` 中 INCLUDE 清单的文件才进包，API 配置（`.data/`）、会话数据（`workspaces/`）、
+node_modules 等永远不会泄入；打包前后各做一次泄漏扫描（含 `sk-` 密钥模式检查），失败自动中止。
+包内附 `VERSION.txt`（版本 + 构建时间 + 入口说明）。
+
+发布检查单：`node test/hwj-smoke.js` 全绿 → `node tools/release.js --check` 通过 → 打包 → 上传 Release。
