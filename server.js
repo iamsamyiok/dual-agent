@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.23';
+const APP_VERSION = '0.9.25';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -23,7 +23,7 @@ const outerMod = require('./lib/outer');
 const { chatInner, isMultiStepTask, isLongFormTask, isRefusalNudge, pairSafeTail } = require('./lib/inner');
 const { validProfiles, pickProfile } = require('./lib/profiles');
 const { NET_CODES, withTaskResume } = require('./lib/llmRetry');
-const { extractIntent, formatIntentNote, buildVerifyArgs, buildJudgePrompt, parseVerdict, callLLMText } = require('./lib/intent');
+// 意图系统已解耦为插件，通过 plugins.runPlugin('intent', ...) 调用
 
 // ---------- 日志 tee ----------
 const LOG_PATH = path.join(DATA_DIR, 'server.log');
@@ -516,33 +516,29 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
           finalMsg = message + `\n\n[框架提示] 你上一条回复以"无法/抱歉/建议"拒绝了用户的任务，本消息是用户要求你执行它的催促——指的就是刚才被你拒绝的那个任务，不是历史中的任何其他任务。现在必须开始执行：按长文/多步任务的工具流纪律（todo 建清单 → 分段 write → verify 验证）完成它；工作区记忆与历史中的旧任务内容（如有）仅为背景参考，与当前任务无关时必须忽略，禁止被带偏任务目标。`;
           send({ type: 'info', text: '检测到拒绝后催促，已注入任务对齐指令' });
         }
-      }
- // 意图契约抽取（v0.9.14 病根：长任务后段上下文折叠把任务原文埋进历史 → 交付漏项。
- // todo 治步骤执行，意图契约治要求覆盖）。仅多步任务 + 真实模式启用（DUAL_AGENT_INTENT=0 关闭）；
- // 抽取失败优雅降级返回 null，任务照常执行；换任务时旧契约必须清除（防过期要求污染后续任务）
- const intentPath = path.join(WS_DIR, '.intent.json');
-  let intent = null;
-  if (process.env.DUAL_AGENT_MOCK !== '1' && process.env.DUAL_AGENT_INTENT !== '0') {
-    const needsIntent = multiStep || isLongFormTask(message);
-    if (needsIntent) {
-      send({ type: 'info', text: '多步/长文任务：抽取意图契约（目标 / 交付物 / 验收条款）' });
-      intent = await extractIntent(cfg.inner, message, { onEvent: send, wsDir: WS_DIR });
-      if (intent) {
-        try { fs.writeFileSync(intentPath, JSON.stringify(intent, null, 1), 'utf8'); } catch { /* 落盘失败不阻断 */ }
-        send({ type: 'info', text: `意图契约已建立：交付物 ${intent.deliverables.length} 项 / 验收条款 ${intent.acceptance.length} 条（工作区 .intent.json）` });
-      } else {
-        try { fs.unlinkSync(intentPath); } catch { /* 本无旧文件 */ }
-        send({ type: 'info', text: '意图抽取失败，跳过意图闭环（任务照常执行）' });
-      }
-    } else {
-      try { fs.unlinkSync(intentPath); } catch { /* 清除上一任务的过期契约 */ }
-    }
   }
- // 意图注记：每轮读最新契约注入发送副本（复用 todoNote 模式，落盘干净）
- const intentNote = () => {
-   try { return formatIntentNote(JSON.parse(fs.readFileSync(intentPath, 'utf8'))); } catch { return ''; }
- };
- innerMessages.push({ role: 'user', content: finalMsg });
+  // 意图注记：从插件读取最新契约注入发送副本
+  const intentNote = () => {
+    try {
+      const intentPlugin = require('./plugins/intent');
+      return intentPlugin.getIntentNote();
+    } catch { return ''; }
+  };
+  // 检查是否有活跃意图（用于交付核验）
+  const hasActiveIntent = () => {
+    try {
+      const intentPlugin = require('./plugins/intent');
+      return !!intentPlugin.getState().intent;
+    } catch { return false; }
+  };
+  // 获取当前意图对象（用于交付核验）
+  const getCurrentIntent = () => {
+    try {
+      const intentPlugin = require('./plugins/intent');
+      return intentPlugin.getState().intent;
+    } catch { return null; }
+  };
+  innerMessages.push({ role: 'user', content: finalMsg });
  persistInnerMessages();
  // 事件处理器（主/子智能体共用）：过程落盘 + usage 落账 + SSE 透传（子事件带 sub 标记）
  const handleEvent = (ev) => {
@@ -746,36 +742,50 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
      wroteAny = false; // 重置探针，检测重入后是否仍有写入
      lastAnswer = await withTaskResume(runInner, { onInfo: send, label: `长文强制执行${longFormForceCount > 1 ? '-' + longFormForceCount : ''}` });
    }
-   // 交付核验 + 自动返修（v0.9.14）：对照意图契约核验（硬断言先行，语义缺口 judge 补），
-   // 发现缺口注入返修指令重入执行，上限 2 轮（防完美主义死循环——v0.9.10 教训的反面）
-   if (intent) {
-     const collectGaps = async () => {
-       const gaps = [];
-       const hardLines = [];
-       // 硬断言：文件类交付物 exists / json_valid（框架判定，零 token）
-       for (const va of buildVerifyArgs(intent)) {
-         try {
-           const r = String(await plugins.runPlugin('verify', va, { cwd: WS_DIR, dataDir: DATA_DIR }));
-           hardLines.push(`${va.path}：${r.split('\n')[0].slice(0, 120)}`);
-           if (/FAIL/.test(r)) gaps.push(`交付文件未达标（硬断言 FAIL）：${va.path}`);
-         } catch (e) {
-           hardLines.push(`${va.path}：断言异常`);
-           gaps.push(`交付文件无法核验：${va.path}——${String((e && e.message) || e).slice(0, 120)}`);
-         }
-       }
-       // LLM judge：核验语义覆盖（明确的问题是否回答、要求的维度是否齐全）。
-       // 只在硬断言干净时跑（已失败时返修必然发生，省一次调用）；judge 失败按无缺口处理
-       if (!gaps.length) {
-         try {
-           const verdictText = await callLLMText(cfg.inner, [
-             { role: 'system', content: '你是交付核验裁判，只输出 JSON。' },
-             { role: 'user', content: buildJudgePrompt(intent, lastAnswer, hardLines) }
-           ], { maxTokens: 500, onEvent: send, label: '交付核验' });
-           gaps.push(...parseVerdict(verdictText).gaps);
-         } catch { /* judge 通道故障按通过处理 */ }
-       }
-       return gaps;
-     };
+    // 交付核验 + 自动返修（v0.9.24 解耦为插件）：对照意图契约核验（硬断言先行，语义缺口 judge 补），
+    // 发现缺口注入返修指令重入执行，上限 2 轮（防完美主义死循环）
+    if (hasActiveIntent()) {
+      const intent = getCurrentIntent();
+      const collectGaps = async () => {
+        const gaps = [];
+        const hardLines = [];
+        // 硬断言：文件类交付物 exists / json_valid
+        for (const d of intent.deliverables) {
+          if (!d.path) continue;
+          const fp = path.join(WS_DIR, d.path);
+          const exists = fs.existsSync(fp);
+          if (!exists) {
+            gaps.push(`交付文件未找到：${d.path}`);
+            hardLines.push(`${d.path}：FAIL - 文件不存在`);
+          } else {
+            hardLines.push(`${d.path}：PASS - 文件存在`);
+            if (d.path.endsWith('.json')) {
+              try {
+                JSON.parse(fs.readFileSync(fp, 'utf8'));
+                hardLines.push(`${d.path}：PASS - JSON 格式有效`);
+              } catch {
+                gaps.push(`交付文件 JSON 格式错误：${d.path}`);
+                hardLines.push(`${d.path}：FAIL - JSON 格式无效`);
+              }
+            }
+          }
+        }
+        // LLM judge：核验语义覆盖
+        if (!gaps.length) {
+          try {
+            const verdictText = await plugins.runPlugin('intent', {
+              action: 'verify',
+              finalAnswer: lastAnswer
+            }, { cwd: WS_DIR, dataDir: DATA_DIR, config: CONFIG_PATH });
+            const match = verdictText.match(/发现 (\d+) 项缺口/);
+            if (match && Number(match[1]) > 0) {
+              const gapLines = verdictText.split('\n').filter(l => l.match(/^\d+\./));
+              gaps.push(...gapLines.map(l => l.replace(/^\d+\.\s*/, '')));
+            }
+          } catch { /* judge 通道故障按通过处理 */ }
+        }
+        return gaps;
+      };
      const MAX_REPAIR = 2;
      for (let r = 0; ; r++) {
        const gaps = await collectGaps();

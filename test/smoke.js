@@ -102,7 +102,7 @@ async function main() {
     const list = plugins.listPlugins();
     // 下限而非锁死数量：审批预检沙盒会带上待审新插件（9 + N），数量上限防失控
     assert.ok(list.length >= 9, `插件数 ${list.length} < 9`);
-    assert.ok(list.length <= 20, `插件数 ${list.length} 异常膨胀`);
+    assert.ok(list.length <= 25, `插件数 ${list.length} 异常膨胀`);
     assert.ok(list.every(p => p.status !== 'broken'), '存在 broken：' + JSON.stringify(list.filter(p => p.status === 'broken')));
     assert.ok(list.filter(p => p.essential).length >= 5);
   });
@@ -303,6 +303,108 @@ async function main() {
     const empty = await plugins.runPlugin('verify', { path: 'x', rules: [] }, ctx);
     assert.ok(empty.includes('至少提供 1 条'), empty);
     assert.ok(/^插件 verify/.test(empty), '应被标记为失败调用：' + empty);
+  });
+
+  // ===== v0.9.25 原子插件：stat / diff / query / calc / tree / archive / probe =====
+  await t('stat 插件：单文件客观统计（CJK 口径）+ glob 汇总', async () => {
+    fs.writeFileSync(path.join(WS, 'st-a.md'), '你好世界\nhello world\n第二行\n', 'utf8');
+    fs.writeFileSync(path.join(WS, 'st-b.md'), '测试\n', 'utf8');
+    const one = await plugins.runPlugin('stat', { path: 'st-a.md' }, ctx);
+    assert.ok(one.includes('CJK 字数（中日韩字数口径）：7'), one); // 你好世界 4 + 第二行 3
+    const glob = await plugins.runPlugin('stat', { path: '**/*.md' }, ctx);
+    assert.ok(glob.includes('匹配') && glob.includes('st-a.md') && glob.includes('st-b.md'), glob);
+    const miss = await plugins.runPlugin('stat', { path: 'no-such.md' }, ctx);
+    assert.ok(/^插件 stat/.test(miss) && miss.includes('文件不存在'), miss);
+  });
+
+  await t('diff 插件：文件差异 + 零差异判定（返修验证）', async () => {
+    fs.writeFileSync(path.join(WS, 'df-a.txt'), 'line1\nline2\nline3\n', 'utf8');
+    fs.writeFileSync(path.join(WS, 'df-b.txt'), 'line1\nline2-changed\nline3\nline4\n', 'utf8');
+    const d = await plugins.runPlugin('diff', { left: 'df-a.txt', right: 'df-b.txt' }, ctx);
+    assert.ok(d.includes('+2 行新增') && d.includes('-1 行删除'), d);
+    assert.ok(d.includes('@@') && d.includes('-line2') && d.includes('+line2-changed'), d);
+    const same = await plugins.runPlugin('diff', { left: 'df-a.txt', right: 'df-a.txt' }, ctx);
+    assert.ok(same.includes('完全相同（零差异）') && same.includes('返修没有产生任何实际修改'), same);
+    const inline = await plugins.runPlugin('diff', { left: 'a\nb', right: 'a\nc' }, ctx);
+    assert.ok(inline.includes('+1 行新增'), inline);
+  });
+
+  await t('query 插件：JSON 点路径提取 + CSV 筛选（省 token）', async () => {
+    fs.writeFileSync(path.join(WS, 'q-data.json'), JSON.stringify({ code: 0, data: { items: [{ name: '甲', score: 95 }, { name: '乙', score: 60 }] } }), 'utf8');
+    fs.writeFileSync(path.join(WS, 'q-table.csv'), 'name,score\n甲,95\n乙,60\n丙,88\n', 'utf8');
+    const j = await plugins.runPlugin('query', { path: 'q-data.json', mode: 'json', expr: 'data.items[*].name' }, ctx);
+    assert.ok(j.includes('2 项') && j.includes('甲') && j.includes('乙'), j);
+    const j2 = await plugins.runPlugin('query', { path: 'q-data.json', mode: 'json', expr: 'data.items.0.score' }, ctx);
+    assert.ok(j2.includes('95'), j2);
+    const jMiss = await plugins.runPlugin('query', { path: 'q-data.json', mode: 'json', expr: 'data.nope' }, ctx);
+    assert.ok(/^插件 query/.test(jMiss) && jMiss.includes('顶层可用字段'), jMiss);
+    const c = await plugins.runPlugin('query', { path: 'q-table.csv', mode: 'csv', expr: 'select name,score where score>80' }, ctx);
+    assert.ok(c.includes('命中 2 行') && c.includes('甲') && c.includes('丙') && !c.includes('乙'), c);
+    const cBad = await plugins.runPlugin('query', { path: 'q-table.csv', mode: 'csv', expr: 'select nope where x>1' }, ctx);
+    assert.ok(/^插件 query/.test(cBad) && cBad.includes('可用列'), cBad);
+  });
+
+  await t('calc 插件：表达式/聚合/沙箱隔离', async () => {
+    const expr = await plugins.runPlugin('calc', { code: 'round(avg([90, 85, 100]), 2)' }, ctx);
+    assert.ok(expr.includes('91.67'), expr);
+    const block = await plugins.runPlugin('calc', { code: 'const t = data.items.reduce((a,x)=>a+x.n,0); return {total: t};', data: '{"items":[{"n":1},{"n":2},{"n":3}]}' }, ctx);
+    assert.ok(block.includes('"total": 6'), block);
+    const evil = await plugins.runPlugin('calc', { code: 'require("fs")' }, ctx);
+    assert.ok(/^插件 calc/.test(evil) && evil.includes('计算失败'), '沙箱内 require 必须不可用：' + evil);
+    const loop = await plugins.runPlugin('calc', { code: 'while(true){}' }, ctx);
+    assert.ok(/^插件 calc/.test(loop) && loop.includes('超时'), '死循环必须被 500ms 超时截断：' + loop);
+  });
+
+  await t('tree 插件：目录树 + 深度控制 + 越界拦截', async () => {
+    fs.mkdirSync(path.join(WS, 'tr-sub', 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(WS, 'tr-root.txt'), 'x', 'utf8');
+    fs.writeFileSync(path.join(WS, 'tr-sub', 'tr-inner.md'), 'y', 'utf8');
+    fs.writeFileSync(path.join(WS, 'tr-sub', 'deep', 'tr-deep.js'), 'z', 'utf8');
+    const t1 = await plugins.runPlugin('tree', { depth: 1 }, ctx);
+    assert.ok(t1.includes('tr-sub/') && t1.includes('tr-root.txt') && !t1.includes('tr-deep.js'), t1);
+    const t2 = await plugins.runPlugin('tree', { depth: 3 }, ctx);
+    assert.ok(t2.includes('tr-deep.js'), t2);
+    const esc = await plugins.runPlugin('tree', { dir: '../../' }, ctx);
+    assert.ok(/^插件 tree/.test(esc) && esc.includes('越界'), esc);
+  });
+
+  await t('archive 插件：save/list/diff/restore/clean 闭环', async () => {
+    fs.writeFileSync(path.join(WS, 'ar-doc.md'), 'v1 内容', 'utf8');
+    const save = await plugins.runPlugin('archive', { action: 'save', tag: 'test-snap' }, ctx);
+    assert.ok(save.includes('快照已创建') && save.includes('test-snap'), save);
+    const dup = await plugins.runPlugin('archive', { action: 'save', tag: 'test-snap' }, ctx);
+    assert.ok(/^插件 archive/.test(dup) && dup.includes('已存在'), dup);
+    fs.writeFileSync(path.join(WS, 'ar-doc.md'), 'v2 改动', 'utf8');
+    fs.writeFileSync(path.join(WS, 'ar-new.txt'), '新增文件', 'utf8');
+    const diff = await plugins.runPlugin('archive', { action: 'diff', tag: 'test-snap' }, ctx);
+    assert.ok(diff.includes('1 个修改') && diff.includes('~ ar-doc.md') && diff.includes('+ ar-new.txt'), diff);
+    const restore = await plugins.runPlugin('archive', { action: 'restore', tag: 'test-snap' }, ctx);
+    assert.ok(restore.includes('已恢复'), restore);
+    const back = fs.readFileSync(path.join(WS, 'ar-doc.md'), 'utf8');
+    assert.equal(back, 'v1 内容', 'restore 后内容必须回到快照版本');
+    const list = await plugins.runPlugin('archive', { action: 'list' }, ctx);
+    assert.ok(list.includes('test-snap'), list);
+    const clean = await plugins.runPlugin('archive', { action: 'clean', tag: 'test-snap' }, ctx);
+    assert.ok(clean.includes('已删除'), clean);
+  });
+
+  await t('probe 插件：本地 HTTP 冒烟断言（PASS/FAIL 判定）', async () => {
+    const http = require('http');
+    const html = '<html><head><title>探测目标页</title></head><body><h1>欢迎</h1><p>probe-ok</p></body></html>';
+    const srv = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(html); });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      const r = await plugins.runPlugin('probe', { url: base + '/', expect_contains: 'probe-ok', expect_title: '探测', expect_h1: '欢迎' }, ctx);
+      assert.ok(r.includes('PASS') && r.includes('状态码 200'), r);
+      assert.ok(r.includes('4/4 项通过'), r);
+      const r2 = await plugins.runPlugin('probe', { url: base + '/', expect_contains: '不存在的文本' }, ctx);
+      assert.ok(r2.includes('FAIL'), '断言失败必须 FAIL：' + r2);
+      const remote = await plugins.runPlugin('probe', { url: 'https://example.com/' }, ctx);
+      assert.ok(/^插件 probe/.test(remote) && remote.includes('仅支持本地'), '公网地址必须被拒绝：' + remote);
+      const dead = await plugins.runPlugin('probe', { url: 'http://127.0.0.1:1/' }, ctx);
+      assert.ok(/^插件 probe/.test(dead) && dead.includes('探测失败'), dead);
+    } finally { srv.close(); }
   });
   await t('skill 插件：save/get/非法名', async () => {
     await plugins.runPlugin('skill', { action: 'save', name: 't1', content: '# 标题' }, ctx);
@@ -815,14 +917,12 @@ async function main() {
       assert.ok(!messages.some(m => String(m.content || '').includes('[意图契约]')), '落盘 messages 保持干净');
     } finally { globalThis.fetch = origFetch; }
   });
-  await t('静态接线：server 意图闭环三段（抽取 / 注记 / 核验返修，v0.9.14）', () => {
+  await t('静态接线：server 意图闭环三段（抽取 / 注记 / 核验返修，v0.9.24 解耦为插件）', () => {
     const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
-    assert.ok(/extractIntent\(cfg\.inner, message/.test(srv), '任务前抽取意图契约');
     assert.ok(/intentNote,/.test(srv), 'intentNote 传入 chatInner 每轮注记');
-    assert.ok(/collectGaps/.test(srv) && /buildVerifyArgs\(intent\)/.test(srv), '交付核验（硬断言 + judge）');
+    assert.ok(/hasActiveIntent/.test(srv) && /getCurrentIntent/.test(srv), '交付核验通过插件接口获取意图');
     assert.ok(/\[交付核验\] 对照意图契约发现以下未满足项/.test(srv), '缺口注入返修指令');
     assert.ok(/MAX_REPAIR = 2/.test(srv), '返修上限 2 轮（防完美主义死循环）');
-    assert.ok(/unlinkSync\(intentPath\)/.test(srv), '换任务清除过期契约（防污染后续任务）');
   });
 
   await t('计量采集：捕获 choices 空+usage 末帧（旧版此处被 continue 丢弃）', async () => {

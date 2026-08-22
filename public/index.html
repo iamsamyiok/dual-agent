@@ -192,19 +192,19 @@
     <span class="hd-tag" id="tagInner">内层：未配置</span>
     <span class="hd-tag" id="tagOc">OpenCode：检测中…</span>
     <span class="grow"></span>
-    <button class="hd-btn" onclick="openConfig()">配置</button>
-    <button class="hd-btn" onclick="loadAudit()">审计日志</button>
-    <button class="hd-btn" onclick="window.open('/help','_blank')">帮助文档</button>
-  </header>
+     <button class="hd-btn" onclick="openSettings()">设置</button>
+     <button class="hd-btn" onclick="loadAudit()">审计日志</button>
+     <button class="hd-btn" onclick="window.open('/help','_blank')">帮助文档</button>
+   </header>
 
-  <main>
-    <!-- 左：插件管理 -->
-    <section class="col" id="pluginCol">
-      <div class="col-head">
-        <span>插件管理</span>
-        <span class="hint">手动增删改（自动快照可回滚）</span>
-        <button class="toggle-btn" onclick="toggleCol('pluginCol')" title="折叠/展开">✕</button>
-      </div>
+   <main>
+     <!-- 左：插件管理 -->
+     <section class="col" id="pluginCol">
+       <div class="col-head">
+         <span>插件管理</span>
+         <span class="hint">手动增删改（自动快照可回滚）</span>
+         <button class="toggle-btn" onclick="toggleCol('pluginCol')" title="折叠/展开">✕</button>
+       </div>
       <div class="ws-bar">
         <span class="ws-label" title="工作区：隔离不同项目的会话、记忆、技能与执行过程。切换后内层从新项目的上下文开始，互不干扰">工作区</span>
         <select id="wsSel" onchange="switchWorkspace(this.value)" title="切换工作区（会话/记忆/技能/过程文件随工作区隔离）"></select>
@@ -277,26 +277,55 @@
   <button class="mobile-toggle" id="mobileToggle" onclick="cyclePanel()" title="切换面板">☰</button>
 </div>
 
-<!-- 配置弹窗 -->
-<div class="mask" id="configMask">
+<!-- 设置弹窗 -->
+<div class="mask" id="settingsMask">
   <div class="modal">
-    <h3>内层 LLM 配置（OpenAI 兼容 API）</h3>
+    <h3>系统设置</h3>
     <div class="m-body frm">
-      <label>Base URL（如 https://api.siliconflow.cn/v1）</label>
-      <input id="cfgBase" placeholder="https://.../v1">
-      <label>API Key（仅保存在本机 .data/config.json）</label>
-      <input id="cfgKey" type="password" placeholder="sk-...">
-      <label>模型名（如 Qwen/Qwen3-8B）</label>
-      <input id="cfgModel" placeholder="provider/model">
-      <label style="margin-top:10px">多路 API（可选）：子智能体并行时轮转分摊，防单端点速率限制</label>
-      <div id="cfgProfiles"></div>
-      <button class="mini-btn" style="margin-top:4px" onclick="addProfileRow()">+ 添加一路</button>
+      <div class="setting-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="settingPluginPanel" checked onchange="togglePluginPanel(this.checked)">
+          <span>启用左侧插件管理面板</span>
+        </label>
+        <span class="hint">折叠后可通过点击面板窄条重新展开</span>
+      </div>
+      <div class="setting-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="settingOuterPanel" checked onchange="toggleOuterPanel(this.checked)">
+          <span>启用外层 Agent 面板</span>
+        </label>
+        <span class="hint">关闭后仅显示内层 Agent 和内存管理</span>
+      </div>
+      <div class="setting-row">
+        <label class="toggle-label">
+          <input type="checkbox" id="settingIntentSystem" checked onchange="toggleIntentSystem(this.checked)">
+          <span>启用意图契约系统</span>
+        </label>
+        <span class="hint">插件系统会自动加载意图插件（intent.js）</span>
+      </div>
+      <hr style="margin:12px 0;border:none;border-top:1px solid #e5e7eb">
+      <div class="frm-section">
+        <h4>内层 LLM 配置</h4>
+        <label>Base URL（如 https://api.siliconflow.cn/v1）</label>
+        <input id="cfgBase" placeholder="https://.../v1">
+        <label>API Key（仅保存在本机 .data/config.json）</label>
+        <input id="cfgKey" type="password" placeholder="sk-...">
+        <label>模型名（如 Qwen/Qwen3-8B）</label>
+        <input id="cfgModel" placeholder="provider/model">
+        <label style="margin-top:10px">多路 API（可选）：子智能体并行时轮转分摊，防单端点速率限制</label>
+        <div id="cfgProfiles"></div>
+        <button class="mini-btn" style="margin-top:4px" onclick="addProfileRow()">+ 添加一路</button>
+      </div>
     </div>
     <div class="m-foot">
-      <button class="btn-no" onclick="closeConfig()">取消</button>
-      <button class="btn-ok" onclick="saveConfigUi()">保存</button>
+      <button class="btn-no" onclick="closeSettings()">取消</button>
+      <button class="btn-ok" onclick="saveSettings()">保存</button>
     </div>
   </div>
+</div>
+
+<!-- 配置弹窗（保留兼容） -->
+<div class="mask" id="configMask" style="display:none">
 </div>
 
 <!-- 插件编辑弹窗 -->
@@ -370,7 +399,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.9.22';
+const PAGE_VERSION = '0.9.25';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -1193,7 +1222,99 @@ function initCollapsible() {
     const btn = el.querySelector('.col-head .toggle-btn');
     if (btn) btn.textContent = collapsed ? '◈' : '✕';
   });
+  // 恢复设置状态
+  const pluginEnabled = localStorage.getItem('da-plugin-panel-enabled') !== '0';
+  const outerEnabled = localStorage.getItem('da-outer-panel-enabled') !== '0';
+  const intentEnabled = localStorage.getItem('da-intent-system-enabled') !== '0';
+  if ($('settingPluginPanel')) $('settingPluginPanel').checked = pluginEnabled;
+  if ($('settingOuterPanel')) $('settingOuterPanel').checked = outerEnabled;
+  if ($('settingIntentSystem')) $('settingIntentSystem').checked = intentEnabled;
+  // 根据设置控制面板可见性
+  if (!pluginEnabled) toggleCol('pluginCol');
+  if (!outerEnabled) toggleCol('outerCol');
 }
+
+// ==================== 设置面板控制 ====================
+function openSettings() {
+  $('settingsMask').classList.add('show');
+  // 加载配置
+  api('/api/health').then(h => {
+    if (h.innerConfigured) {
+      api('/api/config').then(c => {
+        if (c.inner) {
+          $('cfgBase').value = c.inner.base_url || '';
+          $('cfgKey').value = c.inner.api_key || '';
+          $('cfgModel').value = c.inner.model || '';
+          $('cfgProfiles').innerHTML = '';
+          (c.inner_profiles || []).forEach(p => addProfileRow(p));
+        }
+      }).catch(() => {});
+    }
+  }).catch(() => {});
+}
+
+function closeSettings() {
+  $('settingsMask').classList.remove('show');
+}
+
+function saveSettings() {
+  const profiles = [...$('cfgProfiles').querySelectorAll('.profile-row')].map(r => {
+    const o = {};
+    r.querySelectorAll('input[data-k]').forEach(i => { o[i.dataset.k] = i.value.trim(); });
+    return o;
+  }).filter(o => o.base_url && o.model);
+  api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+    inner: { base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() },
+    inner_profiles: profiles
+  }) }).then(d => {
+    if (d.success) { closeSettings(); toast('设置已保存'); loadHealth(); }
+  }).catch(e => toast('保存失败：' + e.message));
+}
+
+function togglePluginPanel(enabled) {
+  localStorage.setItem('da-plugin-panel-enabled', enabled ? '1' : '0');
+  if (!enabled) {
+    const el = $('pluginCol');
+    if (!el.classList.contains('collapsed')) toggleCol('pluginCol');
+  } else {
+    const el = $('pluginCol');
+    if (el.classList.contains('collapsed')) toggleCol('pluginCol');
+  }
+}
+
+function toggleOuterPanel(enabled) {
+  localStorage.setItem('da-outer-panel-enabled', enabled ? '1' : '0');
+  if (!enabled) {
+    const el = $('outerCol');
+    if (!el.classList.contains('collapsed')) toggleCol('outerCol');
+  } else {
+    const el = $('outerCol');
+    if (el.classList.contains('collapsed')) toggleCol('outerCol');
+  }
+}
+
+function toggleIntentSystem(enabled) {
+  localStorage.setItem('da-intent-system-enabled', enabled ? '1' : '0');
+  toast(enabled ? '意图契约系统已启用' : '意图契约系统已禁用');
+}
+
+function addProfileRow(p) {
+  const div = document.createElement('div');
+  div.className = 'profile-row';
+  div.setAttribute('data-idx', p ? Object.keys(p).length : '');
+  div.innerHTML = `
+    <label>Profile ${p ? '' : ''}</label>
+    <input placeholder="Base URL" value="${p ? p.base_url || '' : ''}" class="profile-url">
+    <input placeholder="API Key" value="${p ? p.api_key || '' : ''}" class="profile-key" type="password">
+    <input placeholder="模型名" value="${p ? p.model || '' : ''}" class="profile-model">
+  `;
+  $('cfgProfiles').appendChild(div);
+}
+
+// 保留旧配置弹窗的兼容性
+function openConfig() { openSettings(); }
+function closeConfig() { closeSettings(); }
+function saveConfigUi() { saveSettings(); }
 
 window.addEventListener('resize', () => {
   if (window.innerWidth > 768) {
