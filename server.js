@@ -4,8 +4,9 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
+const { EventEmitter } = require('events');
 
-const APP_VERSION = '0.9.26';
+const APP_VERSION = '0.9.27';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -1172,6 +1173,27 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // ---------- Channel API（供 Qwen Code Channels 调用） ----------
+    // POST /api/channel/chat - 接收 channel 消息，执行后返回结果
+    if (p === '/api/channel/chat' && req.method === 'POST') {
+      lastSeen = Date.now();
+      handleChannelChat(req, res);
+      return;
+    }
+
+    // GET /api/channel/status - 检查服务状态
+    if (p === '/api/channel/status' && req.method === 'GET') {
+      lastSeen = Date.now();
+      json(res, 200, { 
+        success: true, 
+        status: 'ok',
+        innerConfigured: !!(getConfig().inner.base_url && getConfig().inner.api_key && getConfig().inner.model),
+        innerQueueLength: innerQueue.length,
+        version: APP_VERSION
+      });
+      return;
+    }
+
     res.writeHead(404);
     res.end('Not Found');
   } catch (err) {
@@ -1179,6 +1201,65 @@ const server = http.createServer(async (req, res) => {
     try { json(res, 500, { success: false, error: String((err && err.message) || err) }); } catch { /* ignore */ }
   }
 });
+
+// ---------- Channel API 实现 ----------
+// 复用 handleInnerChat 逻辑，但返回 JSON 而非 SSE
+async function handleChannelChat(req, res) {
+  try {
+    const body = await readBody(req);
+    const message = String(body.message || '').trim();
+    const chatId = String(body.chatId || 'default');
+    
+    if (!message) { json(res, 400, { success: false, error: '消息为空' }); return; }
+    
+    const cfg = getConfig();
+    if (process.env.DUAL_AGENT_MOCK !== '1' && !(cfg.inner.base_url && cfg.inner.api_key && cfg.inner.model)) {
+      json(res, 400, { success: false, error: '内层 API 未配置' });
+      return;
+    }
+    
+    // 复用 handleInnerChat 逻辑，但使用同步方式获取结果
+    const { text, queued } = await runChannelTask(message, chatId);
+    json(res, 200, { success: true, result: text, queued: !!queued });
+  } catch (e) {
+    json(res, 500, { success: false, error: String((e && e.message) || e) });
+  }
+}
+
+// Channel 任务执行器：复用 handleInnerChat，捕获其 SSE 事件流还原最终文本。
+// 事件流走向：handleInnerChat 内部 send = sse(req, res) → res.write("data: {...}\n\n")，
+// 因此 mock res 的 write 必须解析 data: 行收集事件（text 为快照式覆盖，取最后一个）
+function runChannelTask(message, chatId) {
+  return new Promise((resolve, reject) => {
+    const events = [];
+    // mock res 用 EventEmitter：end() 时 emit close，让 sse() 内部的心跳 setInterval 得以清理（防泄漏）
+    const mockRes = new EventEmitter();
+    mockRes.writeHead = () => {};
+    mockRes.write = (chunk) => {
+      for (const line of String(chunk).split('\n')) {
+        const t = line.trim();
+        if (t.startsWith('data: ')) {
+          try { events.push(JSON.parse(t.slice(6))); } catch { /* 非 JSON 行忽略 */ }
+        }
+      }
+    };
+    mockRes.end = () => { mockRes.emit('close'); };
+    const mockReq = new EventEmitter();
+    mockReq.url = '/api/inner/chat';
+    mockReq.method = 'POST';
+    mockReq.destroy = () => {};
+    handleInnerChat(mockReq, mockRes, { message }, false)
+      .then(() => {
+        const errorEvent = [...events].reverse().find(e => e.type === 'error');
+        if (errorEvent) { reject(new Error(errorEvent.content || '任务执行失败')); return; }
+        const queuedEvent = events.find(e => e.type === 'queued');
+        if (queuedEvent) { resolve({ text: queuedEvent.text || '消息已排队，当前任务完成后自动执行', queued: true }); return; }
+        const texts = events.filter(e => e.type === 'text' && e.text && e.text.trim());
+        resolve({ text: texts.length ? texts[texts.length - 1].text : '任务完成', queued: false });
+      })
+      .catch(reject);
+  });
+}
 
 // 就绪后自动打开浏览器（一键启动体验；无头/CI 环境自动跳过，DUAL_AGENT_NO_BROWSER=1 显式关闭）
 function openBrowser(target) {
