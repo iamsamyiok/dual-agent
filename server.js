@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.12';
+const APP_VERSION = '0.9.13';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -22,7 +22,7 @@ const approval = require('./lib/approval');
 const outerMod = require('./lib/outer');
 const { chatInner, isMultiStepTask, pairSafeTail } = require('./lib/inner');
 const { validProfiles, pickProfile } = require('./lib/profiles');
-const { NET_CODES } = require('./lib/llmRetry');
+const { NET_CODES, withTaskResume } = require('./lib/llmRetry');
 
 // ---------- 日志 tee ----------
 const LOG_PATH = path.join(DATA_DIR, 'server.log');
@@ -614,12 +614,18 @@ const server = http.createServer(async (req, res) => {
         return result;
       };
       try {
-        await chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
-          todoNote,
-          shouldContinue,
-          // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
-          onRound: () => persistInnerMessages()
-        });
+        // 任务级自动重入（v0.9.13）：withRetry 耗尽（断网/持续限流超约 2 分钟）后不再让任务
+        // 直接死掉——30s/60s/120s 退避后用同一份 innerMessages 重入 chatInner 续跑。
+        // 重入安全：异常抛出点 messages 尾部必为完整配对，模型看到尾部工具结果自然续跑
+        await withTaskResume(
+          () => chatInner(cfg.inner, innerMessages, plugins.toolDefs(), callPluginWrapped, handleEvent, {
+            todoNote,
+            shouldContinue,
+            // 每轮落盘（v0.9.12 P0-2）：工具结果入列后立即持久化，崩溃/重启不丢进行中历史
+            onRound: () => persistInnerMessages()
+          }),
+          { onInfo: send, label: '内层任务' }
+        );
         flushText();
         persistInnerMessages();
         send({ type: 'done' });

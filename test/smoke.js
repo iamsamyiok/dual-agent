@@ -482,6 +482,81 @@ async function main() {
     assert.ok(!isRateLimitText('invalid api key'));
   });
 
+  // ===== 任务级自动重入（v0.9.13 病根：withRetry 耗尽 → 任务死，但历史每轮落盘状态完好）=====
+  const { withTaskResume, isTransientError } = require(path.join(ROOT, 'lib', 'llmRetry'));
+  await t('withTaskResume：瞬态错误退避后重入成功（info 提示 + 递增 attempt）', async () => {
+    process.env.DUAL_AGENT_RESUME_BASE_MS = '1';
+    let n = 0;
+    const events = [];
+    const attempts = [];
+    const r = await withTaskResume(async (attempt) => {
+      attempts.push(attempt);
+      n += 1;
+      if (n <= 2) throw Object.assign(new Error('fetch failed: ECONNRESET'), { code: 'ECONNRESET' });
+      return 'done';
+    }, { onInfo: e => events.push(e), label: '内层任务' });
+    delete process.env.DUAL_AGENT_RESUME_BASE_MS;
+    assert.equal(r, 'done');
+    assert.equal(n, 3, '第三次成功');
+    assert.deepEqual(attempts, [0, 1, 2], 'attempt 从 0 递增');
+    assert.equal(events.length, 2, '两次退避提示');
+    assert.ok(events[0].text.includes('自动恢复重入（第 1/3 次）'), events[0].text);
+    assert.ok(events[1].text.includes('第 2/3'), '提示序号递增');
+  });
+  await t('withTaskResume：非瞬态错误（401 配置错）立即上抛不重入', async () => {
+    let n = 0;
+    let threw = '';
+    try {
+      await withTaskResume(async () => { n += 1; throw new Error('内层 API 401：invalid api key'); }, { onInfo: () => {}, maxResumes: 3 });
+    } catch (e) { threw = e.message; }
+    assert.equal(n, 1, '只执行一次');
+    assert.ok(/401/.test(threw), '原样上抛');
+  });
+  await t('withTaskResume：重入耗尽（3 次）后上抛最后的瞬态错误', async () => {
+    process.env.DUAL_AGENT_RESUME_BASE_MS = '1';
+    let n = 0;
+    const events = [];
+    try {
+      await withTaskResume(async () => { n += 1; throw new RetryableError('API 429：持续限流'); }, { onInfo: e => events.push(e) });
+    } catch (e) {
+      delete process.env.DUAL_AGENT_RESUME_BASE_MS;
+      assert.ok(/429/.test(e.message), '抛出最后的限流错误');
+    }
+    delete process.env.DUAL_AGENT_RESUME_BASE_MS;
+    assert.equal(n, 4, '1 次初始 + 3 次重入');
+    assert.equal(events.length, 3, '3 条恢复提示');
+  });
+  await t('withTaskResume：重入用同一入参状态续跑（fn 闭包内计数器跨重入保留）', async () => {
+    process.env.DUAL_AGENT_RESUME_BASE_MS = '1';
+    // 模拟真实场景：fn 内部对共享 messages 数组追加，重入后看到之前的状态
+    const messages = [{ role: 'user', content: 'task' }];
+    const r = await withTaskResume(async () => {
+      if (messages.length < 3) {
+        messages.push({ role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'read', arguments: '{}' } }] });
+        messages.push({ role: 'tool', tool_call_id: 'c1', content: 'r1' });
+        throw Object.assign(new Error('network dropped mid-task'), { code: 'EPIPE' });
+      }
+      messages.push({ role: 'assistant', content: 'final' });
+      return 'final';
+    }, { onInfo: () => {} });
+    delete process.env.DUAL_AGENT_RESUME_BASE_MS;
+    assert.equal(r, 'final');
+    assert.equal(messages.length, 4, '重入看到重入前的工具配对（不重做）');
+    assert.equal(messages[messages.length - 1].content, 'final');
+  });
+  await t('isTransientError：限流/网络 code 判定，参数与配置错误不算', () => {
+    assert.ok(isTransientError(new RetryableError('429')), 'retryable 标记');
+    assert.ok(isTransientError(Object.assign(new Error('x'), { code: 'ETIMEDOUT' })), '网络 code');
+    assert.ok(!isTransientError(new Error('400 bad request')), '参数错误');
+    assert.ok(!isTransientError(Object.assign(new Error('x'), { code: 'EINVAL' })), '非网络 code');
+    assert.ok(!isTransientError(null), '空值安全');
+  });
+  await t('静态接线：server /api/inner/chat 用 withTaskResume 包裹 chatInner（v0.9.13）', () => {
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    assert.ok(/withTaskResume\(\s*\(\) => chatInner\(/.test(srv), 'chatInner 调用被 withTaskResume 包裹');
+    assert.ok(/\{ onInfo: send, label: '内层任务' \}/.test(srv), '恢复提示走 SSE info 通道');
+  });
+
   // ===== token 计量机制（v0.9.0 四层改造）=====
   await t('estimateTokens：CJK ×1 + 其余 ceil/4 折算', () => {
     assert.equal(estimateTokens('你好'), 2, '2 个 CJK = 2 tok');
