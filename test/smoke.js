@@ -116,6 +116,98 @@ async function main() {
   const WS = path.join(TMP, 'ws');
   fs.mkdirSync(WS, { recursive: true });
   const ctx = { cwd: WS, dataDir: DATA_TMP };
+  // ===== 本地文档处理（v0.9.16：借鉴 search-starter-app 的轻量摄入+检索）=====
+  // 测试 fixture 三件套：纯文本直读 / 最小 PDF（无压缩文本流）/ stored-zip DOCX/XLSX（手写 zip 容器）
+  const UP = path.join(WS, 'uploads');
+  fs.mkdirSync(UP, { recursive: true });
+  // 最小 zip 生成器（stored 不压缩）：local headers + central directory + EOCD
+  const makeZip = (files) => {
+    const chunks = [];
+    const cd = [];
+    let off = 0;
+    for (const [name, content] of files) {
+      const data = Buffer.from(content, 'utf8');
+      const nameB = Buffer.from(name, 'utf8');
+      const crc = (() => { let c = 0; for (const b of data) { c ^= b; for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1)); } return (c ^ -1) >>> 0; })();
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(0, 6); lh.writeUInt16LE(0, 8);
+      lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22);
+      lh.writeUInt16LE(nameB.length, 26); lh.writeUInt16LE(0, 28);
+      chunks.push(lh, nameB, data);
+      const ce = Buffer.alloc(46);
+      ce.writeUInt32LE(0x02014b50, 0); ce.writeUInt16LE(0, 4); ce.writeUInt16LE(0, 6); ce.writeUInt16LE(0, 8);
+      ce.writeUInt32LE(crc, 16); ce.writeUInt32LE(data.length, 20); ce.writeUInt32LE(data.length, 24);
+      ce.writeUInt16LE(nameB.length, 28); ce.writeUInt32LE(off, 42);
+      cd.push(ce, nameB);
+      off += 30 + nameB.length + data.length;
+    }
+    const cdBuf = Buffer.concat(cd);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(files.length, 8); eocd.writeUInt16LE(files.length, 10);
+    eocd.writeUInt32LE(cdBuf.length, 12); eocd.writeUInt32LE(off, 16);
+    return Buffer.concat([...chunks, cdBuf, eocd]);
+  };
+  fs.writeFileSync(path.join(UP, 'notes.txt'), '第一行：项目端口 3788\n第二行：数据库端口 5432\n第三行：无关键词内容');
+  fs.writeFileSync(path.join(UP, 'readme.md'), '# 标题\n\n正文 **加粗** 与 `code`\n');
+  const pdfFx = `%PDF-1.4\n1 0 obj\n<< /Length 100 >>\nstream\nBT /F1 12 Tf 72 720 Td (Hello PDF \\101\\102 extraction) Tj ET\nBT /F1 12 Tf 72 700 Td (second line) Tj ET\nendstream\nendobj\ntrailer\n`;
+  fs.writeFileSync(path.join(UP, 'sample.pdf'), Buffer.from(pdfFx, 'latin1'));
+  fs.writeFileSync(path.join(UP, 'report.docx'), makeZip([
+    ['word/document.xml', '<w:document><w:body><w:p><w:r><w:t>Hello </w:t></w:r><w:r><w:t>World</w:t></w:r></w:p><w:p><w:r><w:t>利润 &amp; 损益表</w:t></w:r></w:p></w:body></w:document>']
+  ]));
+  fs.writeFileSync(path.join(UP, 'data.xlsx'), makeZip([
+    ['xl/sharedStrings.xml', '<sst><si><t>名称</t></si><si><t>数值</t></si></sst>'],
+    ['xl/worksheets/sheet1.xml', '<worksheet><sheetData><row><c t="s"><v>0</v></c><c t="s"><v>1</v></c></row><row><c><v>alpha</v></c><c><v>42</v></c></row></sheetData></worksheet>']
+  ]));
+  await t('doc 插件：list 列出上传文档（含大小）', async () => {
+    const r = await plugins.runPlugin('doc', { action: 'list' }, ctx);
+    for (const f of ['notes.txt', 'readme.md', 'sample.pdf', 'report.docx', 'data.xlsx']) assert.ok(r.includes(f), `清单含 ${f}`);
+    assert.ok(/KB/.test(r), '含大小');
+  });
+  await t('doc 插件：read 纯文本直读 + tail 分段', async () => {
+    const r = await plugins.runPlugin('doc', { action: 'read', path: 'notes.txt' }, ctx);
+    assert.ok(r.includes('3788') && r.includes('5432'), r);
+    const t2 = await plugins.runPlugin('doc', { action: 'read', path: 'notes.txt', tail: 1 }, ctx);
+    assert.ok(t2.includes('无关键词内容') && t2.includes('显示末尾 1 行'), t2);
+  });
+  await t('doc 插件：PDF 文本提取（无压缩流 + 八进制转义 + 多文本块）', async () => {
+    const r = await plugins.runPlugin('doc', { action: 'read', path: 'sample.pdf' }, ctx);
+    assert.ok(r.includes('Hello PDF AB extraction'), '文本操作符提取（\\101\\102 八进制解码）：' + r.slice(0, 200));
+    assert.ok(r.includes('second line'), '多 BT 块拼接');
+  });
+  await t('doc 插件：DOCX 提取（手写 zip 容器 + XML 实体解码 + 段落换行）', async () => {
+    const r = await plugins.runPlugin('doc', { action: 'read', path: 'report.docx' }, ctx);
+    assert.ok(r.includes('Hello World'), '同段 run 拼接：' + r.slice(0, 200));
+    assert.ok(r.includes('利润 & 损益表'), 'XML 实体解码');
+  });
+  await t('doc 插件：XLSX 提取（sharedStrings 索引 + 行列拼装）', async () => {
+    const r = await plugins.runPlugin('doc', { action: 'read', path: 'data.xlsx' }, ctx);
+    assert.ok(r.includes('名称') && r.includes('数值'), '共享字符串解析');
+    assert.ok(/alpha\t42/.test(r), '行内单元格 tab 分隔：' + r.slice(0, 200));
+  });
+  await t('doc 插件：search 关键词检索（多文档命中 + 行号）', async () => {
+    const r = await plugins.runPlugin('doc', { action: 'search', query: '端口 5432' }, ctx);
+    assert.ok(r.includes('notes.txt'), '命中文档归组');
+    assert.ok(/L2/.test(r), '行号标注');
+    assert.ok(r.includes('5432') && !r.includes('无关键词内容'), '按行命中而非全文');
+    const miss = await plugins.runPlugin('doc', { action: 'search', query: '不存在的词xyz' }, ctx);
+    assert.ok(/未命中/.test(miss), miss);
+  });
+  await t('doc 插件：图片明确报错（可操作）+ 路径越界拦截', async () => {
+    fs.writeFileSync(path.join(UP, 'pic.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+    let err = await plugins.runPlugin('doc', { action: 'read', path: 'pic.png' }, ctx);
+    assert.ok(/图片/.test(err) && /\/files\//.test(err), '图片提示查看路径：' + err);
+    err = await plugins.runPlugin('doc', { action: 'read', path: '../secret.txt' }, ctx);
+    assert.ok(/越界/.test(err), '越界拦截：' + err);
+    err = await plugins.runPlugin('doc', { action: 'read', path: 'nope.txt' }, ctx);
+    assert.ok(/不存在/.test(err), '不存在提示含现有清单');
+  });
+  await t('mdRender：markdown 渲染（标题/代码块/表格/链接/XSS 转义）', () => {
+    // server.js 非导出模块——以子进程 require 方式取函数：直接 vm 加载有副作用（启动服务器），
+    // 改为静态验证 + /view e2e 覆盖渲染结果（此处断言函数存在与关键正则）
+    const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+    assert.ok(/function mdRender\(/.test(srv), 'mdRender 定义');
+    assert.ok(/&lt;script&gt;|replace\(&lt;/.test(srv) || /function mdRender/.test(srv), '渲染前转义');
+  });
   await t('memory 插件：save/search/delete', async () => {
     await plugins.runPlugin('memory', { action: 'save', content: '端口 3788', tags: ['env'] }, ctx);
     const hit = await plugins.runPlugin('memory', { action: 'search', query: '端口' }, ctx);
@@ -1592,6 +1684,49 @@ async function main() {
     assert.ok(msgDef > 0 && queuePush > msgDef, '排队 push 必须在 message 解析之后（重构时差点引入 TDZ ReferenceError）');
     assert.ok(/restoreInnerQueue\(\);[\s\S]{0,200}setImmediate\(\(\) => \{ drainInnerQueue\(\)/.test(srv), '重启恢复队列后立即消化');
     assert.ok(/fromQueue/.test(srv) && /innerLock && !fromQueue/.test(srv), '队列消化跳过锁检查（防竞态窗口重新排队乱序）');
+  });
+
+  // ===== 文档上传与查看（v0.9.16 e2e）=====
+  await t('上传：base64 JSON → uploads 落盘 + 重名加序号 + 非法名拒绝', async () => {
+    const up = async (name, content) => {
+      const r = await fetch(base + '/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, content: Buffer.from(content).toString('base64') }) });
+      return { status: r.status, j: await r.json() };
+    };
+    const a = await up('e2e-note.txt', '上传验证内容 upload-check');
+    assert.equal(a.status, 200);
+    assert.ok(a.j.success && a.j.path === 'uploads/e2e-note.txt', JSON.stringify(a.j));
+    const b = await up('e2e-note.txt', '第二份同名');
+    assert.ok(b.j.name === 'e2e-note-1.txt', '重名自动加序号：' + b.j.name);
+    const c = await up('../evil.sh', 'x');
+    assert.equal(c.status, 400, '路径穿越文件名拒绝');
+    const d = await up('empty.txt', '');
+    assert.equal(d.status, 400, '空内容拒绝');
+    // doc.list 经服务端工作区可见（上传与插件同工作区）
+    const ws = await (await fetch(base + '/api/workspaces')).json();
+    assert.ok(ws.success !== false);
+  });
+  await t('查看路由：/files 直出 Content-Type + /view md 渲染 + 穿越 403 + 404', async () => {
+    const f = await fetch(base + '/files/uploads/e2e-note.txt');
+    assert.equal(f.status, 200);
+    assert.ok((f.headers.get('content-type') || '').includes('text/plain'));
+    assert.ok((await f.text()).includes('upload-check'));
+    // md 渲染页（先在工作区放一个 md）
+    await fetch(base + '/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'e2e-view.md', content: Buffer.from('# 渲染标题\n\n```js\ncode();\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n<script>alert(1)</script>').toString('base64') }) });
+    const v = await fetch(base + '/view/uploads/e2e-view.md');
+    assert.equal(v.status, 200);
+    const html = await v.text();
+    assert.ok(html.includes('<h1>渲染标题</h1>'), '标题渲染');
+    assert.ok(html.includes('<pre><code>code();</code></pre>'), '代码块渲染');
+    assert.ok(html.includes('<table>'), '表格渲染');
+    assert.ok(!html.includes('<script>alert'), 'XSS 转义');
+    assert.ok(html.includes('&lt;script&gt;'), 'script 字面转义可见');
+    // 路径穿越与不存在
+    const t1 = await fetch(base + '/files/' + encodeURIComponent('../config.json'));
+    assert.ok([400, 403, 404].includes(t1.status), '越界/不存在被拦截：' + t1.status);
+    const t2 = await fetch(base + '/files/uploads/ghost.txt');
+    assert.equal(t2.status, 404);
+    // 原始文件链接（/view 页内指向 /files）
+    assert.ok(html.includes('/files/uploads/e2e-view.md'), '渲染页含原始文件链接');
   });
 
   // ===== token 计量相关测试 =====

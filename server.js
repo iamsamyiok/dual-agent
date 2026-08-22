@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 
-const APP_VERSION = '0.9.15';
+const APP_VERSION = '0.9.16';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -187,6 +187,70 @@ function recentAuditLines(n) {
 }
 
 // ---------- HTTP 基础 ----------
+// 极简 Markdown → HTML（/view 页渲染用，零依赖）：支持标题/粗斜体/行内代码/代码块/
+// 链接/图片/列表/引用/表格/分隔线；先整体转义防 XSS，再逐块结构化
+function mdRender(src) {
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const inline = (s) => {
+    s = esc(s);
+    s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">');
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>');
+    return s;
+  };
+  const lines = String(src || '').split('\n');
+  let html = '';
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (/^```/.test(line)) { // 代码块
+      let buf = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) buf.push(lines[i++]);
+      i++;
+      html += `<pre><code>${esc(buf.join('\n'))}</code></pre>`;
+      continue;
+    }
+    if (/^\s*$/.test(line)) { i++; continue; }
+    const h = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (h) { html += `<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`; i++; continue; }
+    if (/^(\s*[-*_]){3,}\s*$/.test(line)) { html += '<hr>'; i++; continue; }
+    if (/^\s*\|.*\|\s*$/.test(line) && i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) { // 表格
+      const head = line.split('|').slice(1, -1).map(c => c.trim());
+      i += 2;
+      let rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) {
+        rows.push(lines[i].split('|').slice(1, -1).map(c => c.trim()));
+        i++;
+      }
+      html += '<table><thead><tr>' + head.map(c => `<th>${inline(c)}</th>`).join('') + '</tr></thead><tbody>' +
+        rows.map(r => '<tr>' + r.map(c => `<td>${inline(c)}</td>`).join('') + '</tr>').join('') + '</tbody></table>';
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) { // 引用（连续行合并）
+      let buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) buf.push(lines[i++].replace(/^\s*>\s?/, ''));
+      html += `<blockquote>${buf.map(inline).join('<br>')}</blockquote>`;
+      continue;
+    }
+    if (/^\s*([-*+]|\d+[.)])\s+/.test(line)) { // 列表（不嵌套，ul/ol 混排各成块）
+      const ordered = /^\s*\d+[.)]\s+/.test(line);
+      const itemRe = ordered ? /^\s*\d+[.)]\s+(.*)$/ : /^\s*[-*+]\s+(.*)$/;
+      let buf = [];
+      while (i < lines.length && itemRe.test(lines[i])) buf.push(lines[i++].replace(itemRe, '$1'));
+      html += `<${ordered ? 'ol' : 'ul'}>` + buf.map(x => `<li>${inline(x)}</li>`).join('') + `</${ordered ? 'ol' : 'ul'}>`;
+      continue;
+    }
+    let buf = [line]; // 普通段落（连续非空行合并）
+    i++;
+    while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^(```|#{1,6}\s|>|(\s*[-*+]\s)|\s*\|)/.test(lines[i])) buf.push(lines[i++]);
+    html += `<p>${buf.map(inline).join('<br>')}</p>`;
+  }
+  return html;
+}
+
 function json(res, code, data) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(data));
@@ -661,6 +725,99 @@ async function handleInnerChat(req, res, preBody, fromQueue) {
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const p = parsed.pathname;
+
+  // ---------- 文档上传与查看（v0.9.16：本地文档处理 + 交付物在线查看） ----------
+  // 上传：前端 FileReader 读为 base64 JSON POST（避开手写 multipart 解析，保持零依赖）
+  if (p === '/api/upload' && req.method === 'POST') {
+    lastSeen = Date.now();
+    const body = await new Promise((resolve) => {
+      let chunks = [];
+      let size = 0;
+      req.on('data', c => { size += c.length; if (size > 25 * 1024 * 1024) { req.destroy(); resolve(null); } else chunks.push(c); });
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', () => resolve(null));
+    });
+    if (body === null) { json(res, 413, { success: false, error: '文件过大（上限 20MB）' }); return; }
+    let parsed;
+    try { parsed = JSON.parse(body || '{}'); } catch { parsed = {}; }
+    const b64 = String(parsed.content || '');
+    const name = String(parsed.name || '').trim();
+    if (!b64 || !name) { json(res, 400, { success: false, error: 'name/content 缺失' }); return; }
+    if (!/^[\w\-. \u4e00-\u9fff]+$/.test(name) || name.includes('..')) { json(res, 400, { success: false, error: '文件名不合法（仅允许字母数字连字符下划线点空格中文）' }); return; }
+    if (b64.length > 28 * 1024 * 1024) { json(res, 413, { success: false, error: '文件过大（上限 20MB）' }); return; }
+    let buf;
+    try { buf = Buffer.from(b64, 'base64'); } catch { json(res, 400, { success: false, error: 'base64 解码失败' }); return; }
+    if (!buf.length) { json(res, 400, { success: false, error: '解码后为空' }); return; }
+    const upDir = path.join(workspaceDir(), 'uploads');
+    fs.mkdirSync(upDir, { recursive: true });
+    // 重名自动加序号（不覆盖既有上传）
+    let final = name;
+    let n = 1;
+    while (fs.existsSync(path.join(upDir, final))) {
+      const ext = path.extname(name);
+      final = path.basename(name, ext) + `-${n}` + ext;
+      n += 1;
+    }
+    fs.writeFileSync(path.join(upDir, final), buf);
+    appendProcess(`\n### ${fmtClock(Date.now())} 📎 上传\n\n${final}（${(buf.length / 1024).toFixed(1)}KB）\n`);
+    json(res, 200, { success: true, name: final, path: `uploads/${final}`, size: buf.length, url: `/files/uploads/${encodeURIComponent(final)}` });
+    return;
+  }
+  // 查看路由：/files/<相对路径> 工作区内任意文件直出（防穿越 + Content-Type）；
+  // /view/<相对路径> markdown 渲染页（txt/png/jpg 等浏览器原生直出走 /files 即可）
+  const FILE_TYPES = {
+    '.md': 'text/markdown; charset=utf-8', '.txt': 'text/plain; charset=utf-8', '.log': 'text/plain; charset=utf-8',
+    '.json': 'application/json; charset=utf-8', '.csv': 'text/csv; charset=utf-8', '.html': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.xml': 'text/xml; charset=utf-8',
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.svg': 'image/svg+xml',
+    '.pdf': 'application/pdf', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.zip': 'application/zip'
+  };
+  const serveWsFile = (relPath, res) => {
+    const wsRoot = workspaceDir();
+    // decodeURIComponent 后 resolve，再校验仍在工作区内（防 %2e%2e 穿越）
+    const fp = path.resolve(wsRoot, relPath.replace(/^\/+/, ''));
+    if (!fp.startsWith(wsRoot + path.sep) && fp !== wsRoot) {
+      res.writeHead(403); res.end('Forbidden：路径越界'); return false;
+    }
+    if (!fs.existsSync(fp) || !fs.statSync(fp).isFile()) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end(`文件不存在：${relPath}`); return false;
+    }
+    return fp;
+  };
+  if (req.method === 'GET' && (p.startsWith('/files/') || p.startsWith('/view/'))) {
+    lastSeen = Date.now();
+    let relPath;
+    try { relPath = decodeURIComponent(p.replace(/^\/(files|view)\//, '')); } catch { res.writeHead(400); res.end('Bad Request'); return; }
+    if (!relPath) { res.writeHead(400); res.end('Bad Request'); return; }
+    const fp = serveWsFile(relPath, res);
+    if (!fp) return;
+    const ext = path.extname(fp).toLowerCase();
+    if (p.startsWith('/view/')) {
+      // markdown 渲染页：读文件 → mdRender → HTML 包裹（未识别扩展名也按文本渲染）
+      let text;
+      try { text = fs.readFileSync(fp, 'utf8'); } catch { res.writeHead(500); res.end('读取失败'); return; }
+      const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(relPath)}</title>` +
+        `<style>body{font-family:system-ui,sans-serif;max-width:860px;margin:24px auto;padding:0 16px;line-height:1.7;color:#1f2937}` +
+        `pre{background:#f6f8fa;padding:12px;border-radius:6px;overflow:auto}code{background:#f6f8fa;padding:2px 5px;border-radius:3px}` +
+        `pre code{background:none;padding:0}blockquote{border-left:4px solid #d1d5db;margin:8px 0;padding:2px 12px;color:#4b5563}` +
+        `table{border-collapse:collapse}th,td{border:1px solid #d1d5db;padding:6px 10px}img{max-width:100%}` +
+        `.meta{color:#6b7280;font-size:13px;margin-bottom:16px}a{color:#2563eb}</style></head><body>` +
+        `<div class="meta">${esc(relPath)} · <a href="/files/${relPath.split('/').map(encodeURIComponent).join('/')}">原始文件</a></div>${mdRender(text)}</body></html>`);
+      return;
+    }
+    // /files/ 直出（下载型扩展名加 attachment 提示保存；查看型 inline）
+    const downloadExts = new Set(['.zip', '.docx', '.xlsx']);
+    res.writeHead(200, {
+      'Content-Type': FILE_TYPES[ext] || 'application/octet-stream',
+      'Content-Disposition': `${downloadExts.has(ext) ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(path.basename(fp))}`
+    });
+    fs.createReadStream(fp).pipe(res);
+    return;
+  }
 
   // ---------- 静态 ----------
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) {

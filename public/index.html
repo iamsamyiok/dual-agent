@@ -231,9 +231,11 @@
       <div class="chat-body" id="innerMsgs"></div>
       <div class="busy-tip" id="innerBusy">执行中… 完整过程已实时记录到 process.md（双击任务汇总条或点顶部「过程」查看）</div>
       <div class="composer">
-        <input id="innerInput" placeholder="给内层下任务（执行中输入锁定）" autocomplete="off">
-        <button id="innerSendBtn" onclick="innerSend()">发送</button>
-      </div>
+         <button class="mini-btn" id="uploadBtn" onclick="$('fileInput').click()" title="上传本地文档到当前工作区（PDF/DOCX/XLSX 自动提取文本，txt/md 直读）" style="flex:none">📎</button>
+         <input type="file" id="fileInput" style="display:none" multiple>
+         <input id="innerInput" placeholder="给内层下任务（执行中输入锁定）" autocomplete="off">
+         <button id="innerSendBtn" onclick="innerSend()">发送</button>
+       </div>
       <div class="col-rail" onclick="toggleCol('innerCol')" title="展开内层对话"><span class="rail-arrow">»</span><span class="rail-title">内层 Agent</span></div>
     </section>
 
@@ -368,7 +370,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.9.15';
+const PAGE_VERSION = '0.9.16';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -716,7 +718,10 @@ async function loadInnerHistory() {
   box.innerHTML = '';
   for (const m of (d.messages || [])) {
     if (m.role === 'user') appendMsg('innerMsgs', 'user', m.content, '我');
-    else if (m.role === 'assistant' && m.content) appendMsg('innerMsgs', 'assistant', m.content, '内层 Agent');
+    else if (m.role === 'assistant' && m.content) {
+      const el = appendMsg('innerMsgs', 'assistant', m.content, '内层 Agent');
+      if (typeof setMsgHTML === 'function') setMsgHTML(el._text, m.content); // 历史中的文件路径也渲染成链接
+    }
   }
 }
 async function resetInnerChat() {
@@ -729,6 +734,12 @@ async function innerSend() {
   const input = $('innerInput');
   const text = input.value.trim();
   if (!text) return;
+  // 附件上下文注入（v0.9.16）：上传未消化的文档路径追加到任务尾部，模型经 doc 插件读取
+  let finalText = text;
+  if (pendingUploads.length) {
+    finalText += `\n\n[已上传文档] 本次任务可用 doc 插件处理以下文件（doc.read 读内容 / doc.search 检索）：\n${pendingUploads.map(p => '- ' + p).join('\n')}`;
+    pendingUploads = [];
+  }
   innerBusy = true;
   input.disabled = true; $('innerSendBtn').disabled = true;
   $('innerBusy').style.display = 'block';
@@ -737,8 +748,8 @@ async function innerSend() {
   const ai = appendMsg('innerMsgs', 'assistant', '', '内层 Agent');
   let cur = ai;
   try {
-    await streamSSE('/api/inner/chat', { message: text }, ev => {
-      if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '内层 Agent'); cur.textContent = ev.text; scrollBottom('innerMsgs'); }
+    await streamSSE('/api/inner/chat', { message: finalText }, ev => {
+      if (ev.type === 'text') { cur = ensureLive(ai, 'assistant', '内层 Agent'); setMsgHTML(cur, ev.text); scrollBottom('innerMsgs'); }
       else if (ev.type === 'usage') {
         const t = ev.totals || {};
         const k = n => (n >= 1000 ? (n / 1000).toFixed(1) + 'K' : String(n || 0));
@@ -871,6 +882,44 @@ function ensureLive(msgEl, cls, who) {
   return msgEl._text;
 }
 function scrollBottom(id) { const b = $(id); b.scrollTop = b.scrollHeight; }
+// 消息富文本渲染（v0.9.16）：全量转义防 XSS，再把工作区文件路径替换成可点链接——
+// .md 走 /view 渲染页，其余（txt/png/jpg/csv/pdf 等）走 /files 直出
+const FILE_LINK_RE = /(uploads\/[A-Za-z0-9_\-.%\u4e00-\u9fff]+|[A-Za-z0-9_\-\u4e00-\u9fff]+\.(?:md|txt|png|jpe?g|gif|webp|bmp|svg|csv|pdf|html?|json|xml|docx|xlsx|zip))/g;
+function setMsgHTML(el, text) {
+  el.innerHTML = esc(text).replace(FILE_LINK_RE, (m) => {
+    const isMd = /\.md$/i.test(m);
+    const href = (isMd ? '/view/' : '/files/') + m.split('/').map(encodeURIComponent).join('/');
+    return `<a href="${href}" target="_blank" rel="noopener" title="点击新页打开查看">${esc(m)}</a>`;
+  });
+  // 链接点击不冒泡触发父级事件
+  el.querySelectorAll('a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
+}
+// ---------- 文档上传（v0.9.16：本地文档 → 工作区 uploads/，任务上下文自动注入） ----------
+let pendingUploads = [];
+$('fileInput').addEventListener('change', async () => {
+  const files = [...$('fileInput').files];
+  $('fileInput').value = '';
+  if (!files.length) return;
+  $('uploadBtn').disabled = true;
+  for (const f of files) {
+    if (f.size > 20 * 1024 * 1024) { toast(`${f.name} 超过 20MB 上限，已跳过`); continue; }
+    try {
+      const b64 = await new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1]); r.onerror = no; r.readAsDataURL(f); });
+      const r = await fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: f.name, content: b64 }) });
+      const j = await r.json().catch(() => ({ success: false, error: 'HTTP ' + r.status }));
+      if (j.success) {
+        pendingUploads.push(j.path);
+        appendMsg('innerMsgs', 'assistant', `📎 已上传 ${j.name}（${(j.size / 1024).toFixed(1)}KB）——发送任务时自动附加，模型可用 doc 插件读取`, '系统');
+      } else toast(j.error || '上传失败');
+    } catch (e) { toast('上传失败：' + e.message); }
+  }
+  $('uploadBtn').disabled = false;
+  if (pendingUploads.length) {
+    const input = $('innerInput');
+    input.placeholder = `已附加 ${pendingUploads.length} 个文档，输入任务描述后发送…`;
+    input.focus();
+  }
+});
 $('innerInput').addEventListener('keydown', e => { if (e.key === 'Enter') innerSend(); });
 $('outerInput').addEventListener('keydown', e => { if (e.key === 'Enter') outerSend(); });
 
