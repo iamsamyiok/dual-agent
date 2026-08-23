@@ -57,6 +57,7 @@ async function runCommand(line, ctx) {
       const model = await ask('模型名（如 agnes-2.5-flash）', cfg.inner.model);
       try {
         core.saveInnerConfig({ base_url, api_key, model });
+        if (typeof ui.setMeta === 'function') ui.setMeta({ model }); // 状态栏即时显示新模型
         ui.printInfo('配置已保存（与网页版共享 .data/config.json）');
       } catch (e) { ui.printError('保存失败：' + (e && e.message || e)); }
       // embedding（语义记忆 remember/recall 用；推荐硅基流动免费 bge-m3；回车取推荐值，三项全空可跳过）
@@ -71,7 +72,7 @@ async function runCommand(line, ctx) {
           core.saveEmbeddingConfig({ base_url: e_url, api_key: e_key, model: e_model });
           ui.printInfo('Embedding 配置已保存，正在测试连接...');
           const out = await plugins.runPlugin('memory', { action: 'emb_test' }, { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR });
-          ui.printPlain(String(out));
+          ui.printPlain(String(out).split('\n').filter(l => l.trim()).join('\n'));
         } catch (e) { ui.printError('Embedding 保存失败：' + (e && e.message || e)); }
       } else {
         ui.printInfo(ec.model ? 'Embedding 保持已有配置' : '未配置 Embedding（remember/recall 降级为关键词检索）');

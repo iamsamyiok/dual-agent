@@ -10,16 +10,23 @@
 ```bash
 # 全局安装（推荐）
 npm i -g hwj-agent
-hwj-agent                # 终端智能体 TUI（Windows/macOS/Linux 通用）
+hwj-agent                # 检测配置 → 选择 TUI / GUI（见下方首次体验）
+hwj-agent tui            # 直达终端 TUI（跳过检测与选择）
 hwj-agent run "创建 hello.txt 写入问候语"   # 非交互单次任务
-hwj-agent gui            # Web 界面（自动挑端口）
+hwj-agent gui            # 直达 Web 界面（自动挑端口）
 hwj-agent install        # 可选：把 hwj 短命令装入 PATH（喜欢短命令的用户）
 
 # 免安装试跑
 npx hwj-agent run "演示任务"
 ```
 
-**首次使用**：运行 `hwj-agent` 检测到未配置时，回车即自动打开浏览器配置页（表单填 Base URL / API Key / 模型名，保存即生效，回到终端直接输入任务无需重启）；也可 `t` 用终端向导、`n` 跳过。
+**首次体验流程**（`hwj-agent` 一条命令）：
+
+1. 检测 API 配置完整性 + 有效性（GET `/models` 实探，Key 错/服务不通当场发现）
+2. 未配置/无效 → 自动打开浏览器配置页（表单填写保存）→ 回终端按回车重新检测
+3. 检测通过 → 选择界面：回车进终端 TUI，输 2 开网页 GUI
+
+TUI 状态栏实时显示：模型名 · 本次任务时长（运行中走秒，完成定格）· 程序运行时长 · token 用量 · 排队数。
 
 无 npm 环境：Windows 双击 `hwj.bat` / `install.bat`，macOS/Linux 双击 `hwj.command`。
 

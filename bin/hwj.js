@@ -21,7 +21,7 @@ const HELP = [
   '',
   '用法：hwj-agent [命令] [参数]',
   '',
-  '  hwj-agent              启动终端交互界面（等同 hwj-agent tui）',
+  '  hwj-agent              检测配置（未配置/无效则打开网页配置页），就绪后选 TUI 或 GUI',
   '  hwj-agent tui [--ws 名称] 终端交互界面（--ws 指定工作区）',
   '  hwj-agent gui          启动 Web 界面（自动挑端口 3788-3796；已在跑则直接开浏览器）',
   '  hwj-agent run [选项] 提示词 非交互执行单次任务，输出过程与结果（退出码 0/1）',
@@ -53,7 +53,7 @@ function openBrowser(url) {
   try {
     const [cmd, cargs] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
       : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
-    spawn(cmd, cargs, { detached: true, stdio: 'ignore' }).unref();
+    spawn(cmd, cargs, { detached: true, stdio: 'ignore' }).on('error', () => {}).unref(); // 无浏览器/无 xdg-open 环境静默降级（异步 error 必须监听，否则进程崩溃）
   } catch { /* 打不开浏览器时用户可手动访问 URL */ }
 }
 
@@ -179,9 +179,102 @@ function cmdTempNote() {
   process.stdout.write('[hwj] 已打开临时会话窗口：在那个窗口内任意目录可用 hwj 命令，关闭即完全失效。本窗口可以安全关闭。\n');
 }
 
+// ---------- 默认入口流程（v1.1.2）：检测配置 → 有效则选 TUI/GUI，无效/未配置则开网页配置页 ----------
+// 数据目录与 core/server 同源：DUAL_AGENT_DATA 可覆盖（测试隔离）
+function dataDir() { return process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data'); }
+function readInnerConfig() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(dataDir(), 'config.json'), 'utf8'));
+    const i = cfg && cfg.inner;
+    return (i && typeof i === 'object') ? i : {};
+  } catch { return {}; }
+}
+// API 有效性探测：GET {base_url}/models（OpenAI 兼容标准端点，几乎零开销）
+// 200=有效；401/403=key 无效；404/405=端点可达且鉴权通过（部分兼容服务未实现 /models）按有效处理；网络错误=不可达
+async function checkApiValid(inner) {
+  const url = String(inner.base_url || '').replace(/\/+$/, '') + '/models';
+  try {
+    const res = await fetch(url, {
+      headers: { authorization: 'Bearer ' + inner.api_key },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (res.status === 401 || res.status === 403) return { ok: false, reason: `API Key 无效（HTTP ${res.status}）` };
+    if (res.status >= 500) return { ok: false, reason: `服务端错误（HTTP ${res.status}）` };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: `无法连接 ${inner.base_url}（${String((e && e.message) || e).slice(0, 80)}）` };
+  }
+}
+// 打开网页配置页：挑空闲端口起 server（detached，与本命令生命周期解耦），开浏览器；返回 url 或 null
+function openConfigWeb() {
+  const { spawn, spawnSync: ss } = require('child_process');
+  const net = require('net');
+  const tryPort = p => { try { return ss(process.execPath, ['-e', `const n=require('net');const s=n.createServer();s.once('error',()=>process.exit(1));s.once('listening',()=>process.exit(0));s.listen(${p},'127.0.0.1');`], { stdio: 'ignore' }).status === 0; } catch { return false; } };
+  const start = Number(process.env.DUAL_AGENT_PORT) || 3788;
+  for (let p = start; p < start + 9; p++) {
+    if (!tryPort(p)) continue;
+    const env = { ...process.env, NO_PROXY: 'localhost,127.0.0.1', HTTP_PROXY: '', HTTPS_PROXY: '', http_proxy: '', https_proxy: '' };
+    spawn(process.execPath, [SERVER_JS, '--port', String(p)], { detached: true, stdio: 'ignore', env, cwd: ROOT }).unref();
+    const url = `http://localhost:${p}/`;
+    try {
+      const [cmd, cargs] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
+        : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
+      spawn(cmd, cargs, { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+    } catch { /* 浏览器打不开时用户可手动访问 */ }
+    return url;
+  }
+  return null;
+}
+// 终端问答（用后即关，让子进程接管 stdin）
+function askOnce(q) {
+  return new Promise(resolve => {
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(q, a => { rl.close(); resolve(String(a || '').trim().toLowerCase()); });
+  });
+}
+
+async function cmdDefault(rest) {
+  const readline = require('readline');
+  // MOCK 演示模式不做配置检测（离线可用）
+  if (process.env.DUAL_AGENT_MOCK === '1') return await chooseAndRun(rest);
+  let webUrl = null;
+  for (;;) {
+    const inner = readInnerConfig();
+    const complete = !!(inner.base_url && inner.api_key && inner.model);
+    if (!complete) {
+      process.stdout.write('\n[hwj-agent] 尚未配置 API（Base URL / API Key / 模型名）\n');
+    } else {
+      process.stdout.write(`[hwj-agent] 检测 API 有效性：${inner.model} @ ${inner.base_url} ... `);
+      const v = await checkApiValid(inner);
+      process.stdout.write(v.ok ? '有效\n' : `无效（${v.reason}）\n`);
+      if (v.ok) return await chooseAndRun(rest);
+      process.stdout.write('[hwj-agent] 请检查 API 配置（Key 过期/地址错误/服务未启动都会导致检测失败）\n');
+    }
+    if (!webUrl) {
+      webUrl = openConfigWeb();
+      if (webUrl) process.stdout.write(`[hwj-agent] 配置页已打开：${webUrl}（右上角「设置」填写并保存）\n`);
+      else process.stdout.write('[hwj-agent] 端口 3788-3796 被占用，无法打开配置页——可运行 hwj-agent gui 手动处理\n');
+    }
+    if (!process.stdin.isTTY) { process.stdout.write('[hwj-agent] 非交互环境：配置完成后重新运行 hwj-agent\n'); process.exit(1); }
+    const a = await askOnce('完成配置并保存后按回车重新检测（t=跳过检测直接进终端 q=退出）：');
+    if (a === 'q') process.exit(0);
+    if (a === 't') return await chooseAndRun(rest);
+    webUrl = null; // 下轮检测失败时重新拉起/复用配置页提示
+  }
+}
+
+// 配置就绪后的界面选择：回车=TUI（默认），2=GUI
+async function chooseAndRun(rest) {
+  if (!process.stdin.isTTY) return cmdTui(rest); // 管道/受限环境默认 TUI
+  const a = await askOnce('\n选择界面  [1] 终端 TUI（回车默认）  [2] 网页 GUI：');
+  if (a === '2') return cmdGui();
+  return cmdTui(rest);
+}
+
 // ---------- 路由 ----------
-const [sub = 'tui', ...rest] = process.argv.slice(2);
+const [sub, ...rest] = process.argv.slice(2);
 switch (sub) {
+  case undefined: case '': cmdDefault(rest).catch(e => die(e && e.message || e)); break;
   case 'tui': case 'terminal': cmdTui(rest); break;
   case 'gui': case 'web': cmdGui(); break;
   case 'run': cmdRun(rest); break;
@@ -192,5 +285,5 @@ switch (sub) {
   case '_tempnote': cmdTempNote(); break;
   case 'help': case '--help': case '-h': process.stdout.write(HELP + '\n'); break;
   case 'version': case '--version': case '-v': process.stdout.write(`hwj-agent ${PKG.version}\n`); break;
-  default: die(`未知命令：${sub}（hwj help 查看用法）`, 2);
+  default: die(`未知命令：${sub}（hwj-agent help 查看用法）`, 2);
 }

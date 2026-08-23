@@ -101,13 +101,17 @@ async function main() {
     const bad = renderToolLine({ plugin: 'write', args: {}, t0: Date.now(), done: true, ok: false, ms: 10 }, w);
     assert.ok(bad.head.startsWith(' ✗'));
   });
-  await t('renderStatusBar：模式/工作区/token/排队组装', () => {
-    const s = renderStatusBar({ version: '0.9.28', mode: 'plan', ws: 'test-ws', tokens: { prompt: 9000, completion: 2500 }, calls: 3, busy: '' }, 80);
+  await t('renderStatusBar：模式/工作区/token/排队/模型/时长组装', () => {
+    const s = renderStatusBar({ version: '0.9.28', mode: 'plan', ws: 'test-ws', tokens: { prompt: 9000, completion: 2500 }, calls: 3, busy: '' }, 100);
     assert.ok(s.includes('plan') && s.includes('ws:test-ws') && s.includes('11.5k tok'));
     const s2 = renderStatusBar({ version: '0.9.28', mode: 'build', ws: 'default' }, 80);
     assert.ok(s2.includes('build'));
     const s3 = renderStatusBar({ version: '0.9.28', mode: 'build', ws: 'default', queueN: 2 }, 80);
     assert.ok(s3.includes('排队 2'));
+    const s4 = renderStatusBar({ version: '0.9.28', mode: 'build', ws: 'default', model: 'agnes-2.5-flash', taskT0: Date.now() - 8400, sessT0: Date.now() - 192000 }, 120);
+    assert.ok(s4.includes('agnes-2.5-flash') && s4.includes('任务 8.4s') && s4.includes('运行 3m12s'), s4);
+    const s5 = renderStatusBar({ version: '0.9.28', mode: 'build', ws: 'default', lastTaskDur: 45000 }, 120);
+    assert.ok(s5.includes('任务 45.0s'), s5);
   });
 
   // ---- TUI 屏幕渲染：VT 模拟器驱动完整交互流，断言折叠/单前缀/无重复/回显吸收 ----
@@ -413,6 +417,26 @@ async function main() {
     const r = await runScript('无配置任务', { DUAL_AGENT_MOCK: '0' });
     assert.strictEqual(r.code, 1);
     assert.ok(r.out.includes('未配置') || r.out.includes('/config'));
+  });
+  await t('默认入口（非 MOCK 未配置，非交互）：提示配置并退出码 1', async () => {
+    fs.writeFileSync(core.CONFIG_PATH, JSON.stringify({ inner: { base_url: '', api_key: '', model: '' } }));
+    const r = await runDisp([], { DUAL_AGENT_MOCK: '0' });
+    assert.strictEqual(r.code, 1);
+    assert.ok(r.out.includes('尚未配置'), r.out);
+    assert.ok(r.out.includes('非交互环境'), '非 TTY 应提示重新运行而不是挂起');
+  });
+  await t('默认入口（MOCK）：跳过检测直接进界面选择（非交互默认 TUI）', async () => {
+    fs.writeFileSync(core.CONFIG_PATH, JSON.stringify({ inner: { base_url: '', api_key: '', model: '' } }));
+    const r = await runDisp([], { DUAL_AGENT_MOCK: '1' });
+    // 非交互 → chooseAndRun 默认 TUI → TUI 在非 TTY 下要求 --script，退出码 2（提示在 stderr）
+    assert.strictEqual(r.code, 2);
+    assert.ok((r.out + r.err).includes('--script'), r.out + r.err);
+  });
+  await t('默认入口（配置无效 Key，非交互）：检测失败提示后退出码 1', async () => {
+    fs.writeFileSync(core.CONFIG_PATH, JSON.stringify({ inner: { base_url: 'http://127.0.0.1:1/v1', api_key: 'sk-bad', model: 'm' } }));
+    const r = await runDisp([], { DUAL_AGENT_MOCK: '0' });
+    assert.strictEqual(r.code, 1);
+    assert.ok(r.out.includes('检测 API 有效性') && r.out.includes('无效'), r.out);
   });
 
   console.log(`\n结果：${passed} 通过，${failed} 失败`);

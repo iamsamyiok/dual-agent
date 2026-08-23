@@ -1,6 +1,6 @@
 {
   "name": "hwj-agent",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "双层 Agent 自迭代系统 — 内层执行 Agent（插件工具流）+ 外层评审迭代 + hwj 终端智能体，零依赖",
   "main": "index.js",
   "bin": {

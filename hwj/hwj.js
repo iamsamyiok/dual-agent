@@ -15,8 +15,8 @@ const WS_ARG = argOf('--ws');
 const INTERACTIVE = !SCRIPT_MSG && process.stdin.isTTY && process.stdout.isTTY;
 
 const BANNER = [
-  `hwj-agent v${PKG.version} — 双层 Agent 自迭代系统（内层引擎 + 21 插件）`,
-  '输入任务直接执行；/help 查看命令；Ctrl+C 中断任务（空闲时双击退出）'
+  `⎡ hwj-agent v${PKG.version} — 双层 Agent 自迭代系统`,
+  `⎣ 内层引擎 + 21 插件 · /help 查看命令 · Ctrl+C 中断任务（空闲时双击退出）`
 ];
 
 function quit(code) { process.exit(code); }
@@ -62,7 +62,7 @@ async function main() {
   }
 
   // ---------- 交互 TUI 模式 ----------
-  const ui = createTui({ ws, mode, version: PKG.version });
+  const ui = createTui({ ws, mode, version: PKG.version, model: core.getConfig().inner.model || '' });
   let busy = false;          // 任务执行中
   let exiting = false;
   let abortFlag = false;     // SIGINT 置位，runTask 的 callPlugin 边界消费
@@ -173,7 +173,7 @@ async function main() {
         try {
           const [cmd, cargs] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
             : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
-          spawn(cmd, cargs, { detached: true, stdio: 'ignore' }).unref();
+          spawn(cmd, cargs, { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
         } catch { /* 打不开时用户可手动访问 */ }
         ui.printInfo(`配置页已打开：${url}（右上角「设置」填 Base URL / API Key / 模型名，保存即生效）`);
         ui.printInfo('完成后回到本终端直接输入任务即可（无需重启）。打不开浏览器就手动访问上面的地址');

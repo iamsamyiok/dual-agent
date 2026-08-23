@@ -90,9 +90,15 @@ function renderToolLine(tool, width) {
   const body = ellipsis(summarizeArgs(tool.args), Math.max(2, width - headW - durW));
   return { head, body, dur };
 }
-// 状态栏：hwj v0.9.28 · build · ws:default · 12.3k tok · 排队 2 · 执行中
+// 状态栏：hwj-agent v1.1.2 · build · ws:default · 模型 · 任务 8.4s · 运行 3m12s · 12.3k tok · 排队 2 · 执行中
+// taskT0 存在时任务时长实时走秒；lastTaskDur 为上一任务定格时长；sessT0 为本程序启动时刻
 function renderStatusBar(st, width) {
-  const parts = [`hwj ${st.version || ''}`.trim(), st.mode || 'build', `ws:${st.ws || 'default'}`];
+  const now = Date.now();
+  const parts = [`hwj-agent ${st.version || ''}`.trim(), st.mode || 'build', `ws:${st.ws || 'default'}`];
+  if (st.model) parts.push(st.model);
+  if (st.taskT0) parts.push(`任务 ${fmtDur(now - st.taskT0)}`);
+  else if (st.lastTaskDur) parts.push(`任务 ${fmtDur(st.lastTaskDur)}`);
+  if (st.sessT0) parts.push(`运行 ${fmtDur(now - st.sessT0)}`);
   if (st.tokens) parts.push(`${fmtTokens(st.tokens.prompt + st.tokens.completion)} tok`);
   if (st.calls) parts.push(`${st.calls} calls`);
   if (st.queueN) parts.push(`排队 ${st.queueN}`);
@@ -109,7 +115,7 @@ const A = {
   gray: s => `\x1b[90m${s}\x1b[0m`, dim: s => `\x1b[2m\x1b[33m${s}\x1b[0m`,
   red: s => `\x1b[31m${s}\x1b[0m`, bold: s => `\x1b[1m${s}\x1b[0m`
 };
-const PROMPT = '> ';
+const PROMPT = '❯ ';
 const PROMPT_W = 2;
 
 // ---------- TUI 对象 ----------
@@ -120,6 +126,7 @@ function createTui(opts = {}) {
   const plain = !!opts.plain;
   const st = {
     version: opts.version || '', ws: opts.ws || 'default', mode: opts.mode || 'build',
+    model: opts.model || '', sessT0: Date.now(), taskT0: 0, lastTaskDur: 0,
     tokens: null, calls: 0, busy: '', reply: '', tools: [], queueN: 0
   };
   let rl = null;
@@ -181,14 +188,19 @@ function createTui(opts = {}) {
     });
   }
   function printInfo(text) {
+    if (!String(text ?? '').trim()) return; // 空事件不打印（空白行根因：框架偶发发空 info）
     if (plain) { printRaw(`[info] ${text}`); return; }
-    settlePrint(() => { for (const l of wrapText(text, termWidth() - 2)) printRaw(A.dim(' ' + l)); });
+    settlePrint(() => { for (const l of wrapText(text, termWidth() - 2)) printRaw(A.dim(' · ' + l)); });
   }
   function printError(text) {
+    if (!String(text ?? '').trim()) return;
     if (plain) { printRaw(`[错误] ${text}`); return; }
     settlePrint(() => { for (const l of wrapText(text, termWidth() - 2)) printRaw(A.red('✗ ' + l)); });
   }
-  function printPlain(text) { settlePrint(() => printRaw(plain ? text : A.gray(text))); }
+  function printPlain(text) {
+    if (!String(text ?? '').trim()) return;
+    settlePrint(() => printRaw(plain ? text : A.gray(text)));
+  }
 
   // ----- 活动区行集合 -----
   function activeLines() {
@@ -271,11 +283,14 @@ function createTui(opts = {}) {
   // ----- 任务生命周期 -----
   function beginTask() {
     st.reply = ''; st.tools = []; st.busy = '执行中';
+    st.taskT0 = Date.now(); st.lastTaskDur = 0;
     startSpin();
     queueRedraw();
   }
   function endTask() {
     stopSpin();
+    if (st.taskT0) st.lastTaskDur = Date.now() - st.taskT0; // 定格本次任务总时长（状态栏持续显示）
+    st.taskT0 = 0;
     const tools = st.tools.slice();
     st.reply = ''; st.tools = []; st.busy = '';
     // 活动区整体擦除后一次性沉降：工具折叠行（此前未沉降的）+ 回复由调用方 printAssistant 沉降
@@ -323,6 +338,14 @@ function createTui(opts = {}) {
   }
   function stopSpin() { if (spinTimer) { clearInterval(spinTimer); spinTimer = null; } }
 
+  // ----- 走秒时钟：状态栏的任务时长/程序运行时长每秒刷新（与 spinner 独立，空闲也走——运行时长是全局的） -----
+  let clockTimer = null;
+  function startClock() {
+    if (clockTimer || plain) return;
+    clockTimer = setInterval(() => { if (rl) queueRedraw(); }, 1000);
+    if (clockTimer.unref) clockTimer.unref();
+  }
+
   // ----- readline -----
   function estimateEcho(line) {
     return Math.max(1, Math.ceil((PROMPT_W + strWidth(line)) / termWidth()));
@@ -339,6 +362,7 @@ function createTui(opts = {}) {
       onSigint(sigintCount);
     });
     out.on('resize', () => { lastN = 0; queueRedraw(); });
+    startClock(); // 运行时长走秒（空闲也刷新状态栏）
     rl.prompt();
   }
   function setHandlers(h) { if (h.onLine) onLine = h.onLine; if (h.onSigint) onSigint = h.onSigint; }
@@ -346,6 +370,7 @@ function createTui(opts = {}) {
   function clearPromptLine() { if (!plain) out.write(A.clearLine); }
   function close() {
     stopSpin();
+    if (clockTimer) { clearInterval(clockTimer); clockTimer = null; }
     if (rl) { rl.close(); rl = null; }
   }
   function recentTools() { return toolHist.map(t => ({ ...t, args: safeClone(t.args) })); }
