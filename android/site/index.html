@@ -64,18 +64,11 @@
     </ul>
   </div>
 
-  <a class="dl" id="dl" href="hwj-agent.apk" download>下载 hwj-agent.apk</a>
-  <p class="meta" id="dlmeta">arm64-v8a / x86_64 · Android 7.0+ · 约 60MB · 侧载安装需允许未知来源</p>
+  <a class="dl" id="dl" href="https://github.com/iamsamyiok/dual-agent/releases/download/v1.2.0-alpha2/hwj-agent.apk" download>下载 hwj-agent.apk（44MB）</a>
+  <p class="meta" id="dlmeta">v1.2.0-alpha2（修复启动卡死）· arm64-v8a / x86_64 · Android 7.0+ · 侧载需允许未知来源 · 下载自 GitHub Release</p>
 </div>
 <script>
-  fetch('hwj-agent.apk', { method: 'HEAD' }).then(r => {
-    if (!r.ok) throw 0;
-    const mb = (Number(r.headers.get('content-length')) / 1048576).toFixed(1);
-    document.getElementById('dlmeta').textContent = 'arm64-v8a / x86_64 · Android 7.0+ · ' + mb + 'MB · 侧载安装需允许未知来源';
-  }).catch(() => {
-    document.getElementById('dl').style.display = 'none';
-    document.getElementById('dlmeta').textContent = 'APK 构建中，稍后刷新';
-  });
+  // APK 托管在 GitHub Release（81MB 超出本页托管上限），直链恒有效
 </script>
 </body>
 </html>

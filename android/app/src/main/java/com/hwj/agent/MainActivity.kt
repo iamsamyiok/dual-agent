@@ -62,11 +62,18 @@ class MainActivity : AppCompatActivity() {
             val deadline = System.currentTimeMillis() + 40_000
             while (System.currentTimeMillis() < deadline && !NodeRuntime.ready) Thread.sleep(300)
             runOnUiThread {
+                splash.visibility = View.GONE // 无论成败都撤掉启动页（否则失败信息被遮住）
                 if (NodeRuntime.ready) {
                     web.loadUrl(NodeRuntime.BASE_URL)
                 } else {
+                    val diag = NodeRuntime.readLog(this)
+                        .replace("&", "&amp;").replace("<", "&lt;").replace("\n", "<br>")
                     web.loadDataWithBaseURL(null,
-                        "<h3>服务启动失败</h3><p>Node 运行时未能就绪，请退出重试或反馈日志。</p>",
+                        "<body style='background:#101418;color:#E8EDF2;font-family:sans-serif;padding:20px;line-height:1.7'>" +
+                        "<h3>服务启动失败</h3><p>Node 运行时未能就绪。可尝试完全退出 App 后重开；" +
+                        "仍失败请把下方诊断日志截图反馈。</p>" +
+                        "<pre style='background:#171C22;padding:14px;border-radius:8px;font-size:12px;white-space:pre-wrap;color:#AAB6C2'>$diag</pre>" +
+                        "</body>",
                         "text/html", "utf-8", null)
                 }
             }
