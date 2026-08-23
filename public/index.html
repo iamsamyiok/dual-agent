@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>双层 Agent 自迭代系统</title>
+<title>wsl agent</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; }
@@ -182,13 +182,24 @@
   .frm input:focus { border-color: #3b82f6; }
   .frm textarea { width: 100%; height: 320px; border: 1px solid #d1d5db; border-radius: 6px; padding: 8px 10px; font: 12px/1.6 Consolas, monospace; outline: none; }
   #toast { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); background: #1e293b; color: #fff; border-radius: 8px; padding: 8px 18px; font-size: 12.5px; display: none; z-index: 99; }
+
+  /* WSL-Solo 移动模式（App WebView）：纯聊天流，隐藏外层与插件面板 */
+  body.mobile-mode #pluginCol, body.mobile-mode #outerCol { display: none !important; }
+  body.mobile-mode #mobileToggle { display: none !important; }
+  body.mobile-mode #innerCol { flex: 1 1 auto; max-width: 100%; }
+  body.mobile-mode header .sub, body.mobile-mode #tagOc { display: none; }
+  body.mobile-mode header .hd-btn { padding: 4px 8px; font-size: 11px; }
+  body.mobile-mode .col-head { padding: 6px 10px; }
+  body.mobile-mode .msg { max-width: 88%; font-size: 13.5px; }
+  body.mobile-mode .composer input { font-size: 15px; } /* ≥16px 防 iOS 聚焦缩放，15 折中 */
+  body.mobile-mode .chat-body { padding: 10px; }
 </style>
 </head>
 <body>
 <div id="app">
   <header>
-    <span class="logo">双层 Agent 自迭代系统</span>
-    <span class="sub">内层执行 + 外层迭代插件</span>
+    <span class="logo">wsl agent</span>
+    <span class="sub">工作空间生命体 · 自锻造进化</span>
     <span class="hd-tag" id="tagInner">内层：未配置</span>
     <span class="hd-tag" id="tagOc">OpenCode：检测中…</span>
     <span class="grow"></span>
@@ -377,7 +388,7 @@
 <!-- 首次运行向导 -->
 <div class="mask" id="wizMask">
   <div class="wiz-card">
-    <h3>欢迎使用双层 Agent 自迭代系统</h3>
+    <h3>欢迎使用 wsl agent</h3>
     <div class="sub">三步跑起来；已就绪的项目会自动跳过本向导</div>
     <div class="wiz-step" id="wizStep1">
       <div class="ws-head"><span class="num" id="wizNum1">1</span> 安装外层引擎 OpenCode</div>
@@ -787,6 +798,7 @@ async function innerSend() {
   input.disabled = true; $('innerSendBtn').disabled = true;
   $('innerBusy').style.display = 'block';
   input.value = '';
+  clearDraft();
   appendMsg('innerMsgs', 'user', text, '我');
   const ai = appendMsg('innerMsgs', 'assistant', '', '内层 Agent');
   let cur = ai;
@@ -1366,10 +1378,26 @@ window.addEventListener('resize', () => {
   }
 });
 
+// ==================== WSL-Solo 移动模式检测（App WebView 标记 → 纯聊天流布局） ====================
+async function detectMobileMode() {
+  try {
+    const d = await api('/api/state');
+    if (d && d.mobile) document.body.classList.add('mobile-mode');
+  } catch { /* 状态接口不可用时保持桌面布局 */ }
+}
+
+// ==================== 草稿自动保存（WSL-SteadyKey 同源理念：输入不因刷新/重启丢失） ====================
+$('innerInput').addEventListener('input', () => {
+  try { localStorage.setItem('da-inner-draft', $('innerInput').value); } catch { /* ignore */ }
+});
+function clearDraft() { try { localStorage.removeItem('da-inner-draft'); } catch { /* ignore */ } }
+try { const _draft = localStorage.getItem('da-inner-draft'); if (_draft) $('innerInput').value = _draft; } catch { /* ignore */ }
+
 // ==================== 网页关闭通知（服务端据此自动退出） ====================
 window.addEventListener('pagehide', () => { try { navigator.sendBeacon('/api/bye', 'bye'); } catch { /* ignore */ } });
 
 // ==================== 启动 ====================
+detectMobileMode();
 loadHealth();
 loadPlugins();
 loadProposals();

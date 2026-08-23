@@ -1,4 +1,4 @@
-// 双层 Agent 自迭代系统 — 零依赖 HTTP 服务
+// wsl agent（WorkSpace-Lifeform）— 零依赖 HTTP 服务
 // 启动：node server.js [--port 3788]；DUAL_AGENT_MOCK=1 为演示模式（内层假 LLM + 外层假 opencode）
 const http = require('http');
 const fs = require('fs');
@@ -6,7 +6,7 @@ const path = require('path');
 const url = require('url');
 const { EventEmitter } = require('events');
 
-const APP_VERSION = '1.1.2';
+const APP_VERSION = '1.3.0';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -36,8 +36,20 @@ process.on('unhandledRejection', e => console.log('[unhandled]', e && (e.stack |
 
 // ---------- 配置（内层 OpenAI 兼容 API；key 仅存本机） ----------
 const DEFAULT_CONFIG = { inner: { base_url: '', api_key: '', model: '' }, embedding: { base_url: '', api_key: '', model: '' }, inner_profiles: [], workspace: 'default', outerSession: '', reviewMark: 0 };
+// WSL-SteadyKey：读失败（写盘瞬间被杀致半写损坏）自动回滚 .bak —— 配置"隔一阵子偶尔丢"的根因修复
+function readConfigFile(p) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
+}
 function getConfig() {
-  try { return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) }; } catch { return { ...DEFAULT_CONFIG }; }
+  const main = readConfigFile(CONFIG_PATH);
+  if (main) return { ...DEFAULT_CONFIG, ...main };
+  const bak = readConfigFile(CONFIG_PATH + '.bak');
+  if (bak) {
+    console.log('[config] config.json 损坏，已从 .bak 自动恢复');
+    try { fs.copyFileSync(CONFIG_PATH + '.bak', CONFIG_PATH); } catch { /* 恢复失败下次再试 */ }
+    return { ...DEFAULT_CONFIG, ...bak };
+  }
+  return { ...DEFAULT_CONFIG };
 }
 function saveConfig(patch) {
   const cfg = getConfig();
@@ -63,7 +75,16 @@ function saveConfig(patch) {
   }
   fs.mkdirSync(DATA_DIR, { recursive: true });
   try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
+    // WSL-SteadyKey 原子写三步：旧配置备份 .bak → tmp 写入 + fsync → rename 原子替换
+    // （旧实现直接 writeFileSync 主文件：进程在写入瞬间被系统杀掉 → 半写损坏 → 配置丢失）
+    try { fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak'); } catch { /* 首次保存无旧文件 */ }
+    const tmp = CONFIG_PATH + '.tmp';
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(next, null, 2));
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, CONFIG_PATH);
     try { fs.chmodSync(CONFIG_PATH, 0o600); } catch { /* 非 POSIX 环境忽略 */ }
   } catch (e) {
     console.log('[config] 配置落盘失败（当前配置仅存活于内存，重启即失）:', e && e.message || e);
@@ -322,7 +343,7 @@ async function opencodeRunner() {
 function buildInnerSystemPrompt() {
   const now = new Date();
   const dateStr = `${now.getFullYear()} 年 ${now.getMonth() + 1} 月 ${now.getDate()} 日（星期${'日一二三四五六'[now.getDay()]}）`;
-  return INNER_SYSTEM_PROMPT_BASE.replace('{TODAY}', dateStr);
+  return INNER_SYSTEM_PROMPT_BASE.replace('{TODAY}', dateStr).replace('{FORGE_DIR}', plugins.FORGE_DIR);
 }
 const INNER_SYSTEM_PROMPT_BASE = [
   '你是内层执行 Agent，通过调用插件完成任务，完成后用简洁中文总结。当前日期：{TODAY}（涉及"最新/近期"的搜索与判断以此为准）。',
@@ -365,6 +386,14 @@ const INNER_SYSTEM_PROMPT_BASE = [
   '4. 长内容分段写入（必须遵守，API 通道对大参数不可靠）：首次 write 创建文件，每段 ≤1500 字符；后续续写一律用 write 的 append=true 逐段追加。绝不能用普通 write 续写——那会整体覆盖之前的段落。需要重新生成完整文件时才用普通 write（覆盖大文件需 confirm=true）。确认文件末尾用 read 的 tail 参数',
   '5. 收到「参数在 API 传输中丢失/截断」的提示时：第 1 次可原样重试；再次出现必须立即改为小分段（≤1500 字符/段 + append=true），禁止第三次发送大参数',
   '6. Python 模块导入：同目录文件可直接导入，跨目录需用 sys.path.insert 或相对导入',
+  '',
+  '## WSL-SelfForge 插件自我锻造（重要）：',
+  '1. 你可以自己制造、安装、改进插件。当现有插件不足以完成任务（缺少能力/功能不够），或用户要求"造一个插件/安装插件/根据这个链接做插件"时，直接锻造，禁止以"没有这个功能"为由拒绝',
+  '2. 插件文件规范：注释头必须是 // @name 小写字母数字连字符 与 // @desc 一句话中文说明；随后 module.exports = { params: <JSON Schema 对象，必填项列入 required>, run: async (args, ctx) => <返回字符串> }；只允许 Node 内置模块（fs/path/https 等），禁止任何第三方 require',
+  '3. 写入位置：用 write 插件写绝对路径 {FORGE_DIR}/<插件名>.js —— 框架自动热加载，写完即可直接调用测试；修改已有插件同样写该路径覆盖',
+  '4. 锻造流程（必须完整执行）：① fetch/search 获取所需 API 文档或参考资料 → ② 设计 params（参数说明写清楚，required 列必填）→ ③ write 写入完整插件代码（顶部加 3-5 行用法注释）→ ④ 立即用正常参数与边界参数各调用一次自测 → ⑤ 失败则 read 检查源码 + edit 修复后重测，直到成功 → ⑥ 总结时报告插件名、功能、用法示例',
+  '5. 内置插件是还原点：锻造区同名文件可覆盖增强内置插件；禁止伪造 @essential true 标记规避用户审视',
+  '6. 插件 run 中网络请求必须带超时（如 15 秒）与 try/catch，返回人类可读的中文结果或 throw Error（框架会标记失败供你自纠）',
   '',
   '## 任务完成报告：',
   '1. 输出检索到的记忆列表',
@@ -1057,6 +1086,19 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { success: r.ok, error: r.error, plugins: plugins.listPlugins().map(pl => ({ ...pl, code: plugins.readCode(pl.name) })) });
       return;
     }
+    // WSL-RestorePoint：还原点回滚（单个插件 / 全部恢复出厂）
+    if (p === '/api/plugins/restore' && req.method === 'POST') {
+      const body = await readBody(req);
+      const name = String(body.name || '').trim();
+      const r = name ? plugins.restorePlugin(name) : plugins.restoreAll();
+      json(res, 200, { success: !!r.ok, error: r.err || '', message: name ? (r.restored ? `已回滚 ${name} 到内置版本` : `已卸载自造插件 ${name}`) : `已恢复出厂插件集（清除 ${r.removed} 个自造/覆盖版）`, plugins: plugins.listPlugins().map(pl => ({ ...pl, code: plugins.readCode(pl.name) })) });
+      return;
+    }
+    // WSL-Solo：App 壳与前端的状态协商（mobile 标记驱动前端隐藏外层/切聊天流布局）
+    if (p === '/api/state' && req.method === 'GET') {
+      json(res, 200, { success: true, mobile: process.env.DUAL_AGENT_MOBILE === '1', version: APP_VERSION, busy: !!(innerLock || outerLock) });
+      return;
+    }
     if (p === '/api/plugins/export' && req.method === 'GET') {
       const name = String(parsed.query.name || '').trim();
       if (!plugins.NAME_RE.test(name) || !plugins.readCode(name)) { json(res, 404, { success: false, error: '插件不存在' }); return; }
@@ -1317,7 +1359,7 @@ function openBrowser(target) {
 
 server.listen(PORT, '127.0.0.1', () => {
   const url0 = `http://localhost:${PORT}`;
-  console.log(`双层 Agent 自迭代系统已启动: ${url0}`);
+  console.log(`wsl agent v${APP_VERSION} 已启动: ${url0}`);
   console.log(`工作区: ${currentWorkspace()}（${workspaceDir()}）`);
   if (process.env.DUAL_AGENT_MOCK === '1') console.log('演示模式：内层假 LLM + 外层假 opencode（不依赖真实 API）');
   if (AUTOSTOP) console.log(`全部网页关闭且空闲超 ${Math.round(IDLE_MS / 1000)} 秒后自动退出（DUAL_AGENT_AUTOSTOP=0 可常驻）`);
