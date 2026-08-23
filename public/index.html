@@ -178,32 +178,66 @@
   .profile-row input { flex: 1; min-width: 120px; }
   #toast { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); background: #0f172a; color: #fff; border-radius: 10px; padding: 9px 20px; font-size: 13px; display: none; z-index: 99; box-shadow: var(--shadow-lg); }
 
-  /* ---- WSL-Solo 移动模式（App WebView） ---- */
+  /* ---- 移动端专用元素（默认隐藏，仅 mobile-mode 显示） ---- */
+  .m-icon-btn { display: none; background: none; border: none; color: inherit; width: 40px; height: 40px; border-radius: 10px; cursor: pointer; align-items: center; justify-content: center; flex-shrink: 0; }
+  .m-icon-btn svg { width: 21px; height: 21px; }
+  .m-icon-btn:active { opacity: .5; }
+  .m-drawer { position: fixed; top: 0; left: -300px; width: 280px; max-width: 82vw; height: 100vh; background: var(--surface); z-index: 120; box-shadow: 4px 0 24px rgba(0,0,0,.2); transition: left .25s cubic-bezier(.4,0,.2,1); display: flex; flex-direction: column; }
+  .m-drawer.open { left: 0; }
+  .m-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 110; display: none; }
+  .m-overlay.open { display: block; }
+  .m-drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .m-logo { font-size: 16px; font-weight: 700; color: var(--text); }
+  .m-close { background: var(--surface-2); border: none; width: 30px; height: 30px; border-radius: 8px; font-size: 14px; cursor: pointer; color: var(--text-sec); }
+  .m-drawer-body { flex: 1; overflow-y: auto; padding: 8px; }
+  .m-item { display: flex; align-items: center; gap: 12px; width: 100%; background: none; border: none; border-radius: 10px; padding: 13px 14px; font-size: 14.5px; color: var(--text); cursor: pointer; text-align: left; }
+  .m-item:active { background: var(--surface-2); }
+  .m-item svg { width: 19px; height: 19px; color: var(--text-sec); flex-shrink: 0; }
+  .m-badge { background: var(--danger); color: #fff; border-radius: 9px; font-size: 10.5px; min-width: 17px; height: 17px; line-height: 17px; text-align: center; padding: 0 5px; margin-left: auto; display: none; }
+  .m-badge.show { display: inline-block; }
+  .m-drawer-foot { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); font-size: 11px; color: var(--text-ter); flex-shrink: 0; }
+  /* 欢迎空状态 */
+  #welcome { margin: auto; text-align: center; padding: 0 24px; }
+  #welcome .w-title { font-size: 22px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+  #welcome .w-sub { font-size: 13.5px; color: var(--text-ter); line-height: 1.7; }
+
+  /* ---- WSL-Solo 移动模式（App WebView）：ChatGPT 风格 ---- */
   body.mobile-mode #pluginCol, body.mobile-mode #outerCol { display: none !important; }
   body.mobile-mode #mobileToggle { display: none !important; }
   body.mobile-mode #innerCol { flex: 1 1 auto; max-width: 100%; }
-  body.mobile-mode header .sub, body.mobile-mode #tagOc { display: none; }
-  body.mobile-mode header .hd-btn { padding: 5px 10px; font-size: 11px; }
-  body.mobile-mode .col-head { padding: 8px 12px; flex-shrink: 0; }
-  body.mobile-mode .col-head .toggle-btn { display: none !important; }
-  body.mobile-mode .msg { max-width: 88%; font-size: 14px; }
-  body.mobile-mode .composer input, body.mobile-mode .composer textarea { font-size: 16px; }
-  body.mobile-mode .composer { padding: 10px 12px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
-  body.mobile-mode .chat-body { padding: 12px; }
+  body.mobile-mode .col-head { display: none !important; }
+  /* 顶栏：白底细分割线，仅 菜单+标题+新对话 */
+  body.mobile-mode header { background: var(--surface); box-shadow: none; border-bottom: 1px solid var(--border); height: 52px; padding: 0 8px; gap: 4px; }
+  body.mobile-mode header .logo { color: var(--text); font-size: 16px; flex: 1; text-align: center; }
+  body.mobile-mode header .sub, body.mobile-mode header .hd-tag, body.mobile-mode header .hd-btn { display: none !important; }
+  body.mobile-mode #mMenuBtn, body.mobile-mode #mNewChatBtn { display: flex; color: var(--text); }
+  /* 消息流：白底，ChatGPT 布局 */
+  body.mobile-mode .chat-body { background: var(--surface); padding: 14px 16px 6px; gap: 14px; }
+  body.mobile-mode .msg { max-width: 100%; }
+  body.mobile-mode .msg .who { display: none; }
+  body.mobile-mode .msg.user { align-self: flex-end; max-width: 82%; background: #eef2f7; color: var(--text); border-radius: 20px 20px 6px 20px; box-shadow: none; padding: 11px 15px; font-size: 15px; }
+  body.mobile-mode .msg.assistant { align-self: stretch; max-width: 100%; background: none; border: none; box-shadow: none; padding: 2px 2px; font-size: 15px; line-height: 1.75; border-radius: 0; }
+  body.mobile-mode .msg.assistant .typing-cursor::after { color: var(--text-ter); }
+  body.mobile-mode .msg.system { font-size: 12px; }
+  /* 工具汇总条移动端弱化 */
+  body.mobile-mode .toolsummary { font-size: 12px; }
+  /* 输入区：ChatGPT 风格圆角框 */
+  body.mobile-mode .composer { border-top: none; background: var(--surface); padding: 8px 12px calc(10px + env(safe-area-inset-bottom)); gap: 8px; align-items: flex-end; }
+  body.mobile-mode .composer textarea { background: var(--surface); border: 1.5px solid #d4dae3; border-radius: 22px; padding: 12px 16px; font-size: 16px; min-height: 48px; max-height: 132px; line-height: 1.45; }
+  body.mobile-mode .composer textarea:focus { border-color: #b8c2d0; box-shadow: none; }
+  body.mobile-mode .composer button { width: 42px; height: 42px; }
+  body.mobile-mode #uploadBtn { background: var(--surface-2); border-radius: 50%; color: var(--text-sec); width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; box-shadow: none; }
+  body.mobile-mode #uploadBtn svg { width: 19px; height: 19px; }
+  body.mobile-mode #innerSendBtn { background: #0f172a; box-shadow: none; }
+  body.mobile-mode .composer .stop-btn { background: #0f172a; box-shadow: none; }
   body.mobile-mode .col { display: flex; flex-direction: column; min-height: 0; }
   body.mobile-mode .col.collapsed { display: none; }
-  body.mobile-mode .scroll-nav { right: 8px; }
-  body.mobile-mode .scroll-nav button { width: 36px; height: 36px; font-size: 15px; }
-  body.mobile-mode header { height: 48px; padding: 0 8px; gap: 6px; }
-  body.mobile-mode header .logo { font-size: 14px; }
-  body.mobile-mode header .hd-btn { padding: 4px 8px; font-size: 11px; gap: 3px; border-radius: 6px; }
-  body.mobile-mode header .hd-btn svg { width: 13px; height: 13px; }
-  body.mobile-mode .col-head { padding: 6px 10px; font-size: 12px; }
-  body.mobile-mode .chat-body { padding: 10px; }
-  body.mobile-mode .composer { padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
-  body.mobile-mode .composer textarea { font-size: 16px; min-height: 48px; }
-  body.mobile-mode .composer button { width: 40px; height: 40px; }
-  body.mobile-mode #innerCol { padding-left: 0; padding-right: 0; }
+  body.mobile-mode .scroll-nav { right: 10px; }
+  body.mobile-mode .scroll-nav button { width: 34px; height: 34px; font-size: 14px; background: rgba(15,23,42,.82); }
+  body.mobile-mode .busy-tip { padding: 2px 16px 6px; }
+  /* 弹窗/向导适配 */
+  body.mobile-mode .modal .box { width: min(520px, 94vw); max-height: 86vh; }
+  body.mobile-mode #toast { top: 60px; }
 
   /* ---- 图标优化 ---- */
   header .hd-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
@@ -215,14 +249,22 @@
  </style>
 </head>
 <body>
-<div id="app">
+ <div id="app">
     <header>
+     <!-- 移动端专用：菜单（默认隐藏，mobile-mode 显示） -->
+     <button class="m-icon-btn" id="mMenuBtn" onclick="openMobileMenu()" title="菜单">
+       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+     </button>
      <span class="logo">wsl agent</span>
      <span class="sub">工作空间生命体 · 自锻造进化</span>
      <span class="hd-tag" id="tagInner">内层：未配置</span>
      <span class="hd-tag" id="tagOc">OpenCode：检测中…</span>
-       <span class="grow"></span>
-        <button class="hd-btn" id="hdApproval" onclick="openApprovalMobi()" title="Agent 插件改进建议审批（有待审批项时高亮）">
+      <span class="grow"></span>
+      <!-- 移动端专用：新对话（默认隐藏，mobile-mode 显示） -->
+      <button class="m-icon-btn" id="mNewChatBtn" onclick="newChat()" title="新对话">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+      </button>
+       <button class="hd-btn" id="hdApproval" onclick="openApprovalMobi()" title="Agent 插件改进建议审批（有待审批项时高亮）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
         审批<span id="apBadge">0</span>
        </button>
@@ -241,6 +283,42 @@
      </header>
 
      <main>
+      <!-- 移动端菜单抽屉（默认隐藏） -->
+      <div class="m-overlay" id="mOverlay" onclick="closeMobileMenu()"></div>
+      <div class="m-drawer" id="mDrawer">
+        <div class="m-drawer-head">
+          <span class="m-logo">wsl agent</span>
+          <button class="m-close" onclick="closeMobileMenu()">✕</button>
+        </div>
+        <div class="m-drawer-body">
+          <button class="m-item" onclick="closeMobileMenu();newChat()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+            新对话
+          </button>
+          <button class="m-item" onclick="closeMobileMenu();openSettings()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            设置
+          </button>
+          <button class="m-item" onclick="closeMobileMenu();openApprovalMobi()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+            审批中心<span class="m-badge" id="mApBadge">0</span>
+          </button>
+          <button class="m-item" onclick="closeMobileMenu();window.open('/process','_blank')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            执行过程
+          </button>
+          <button class="m-item" onclick="closeMobileMenu();loadAudit()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            审计日志
+          </button>
+          <button class="m-item" onclick="closeMobileMenu();window.open('/help','_blank')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            帮助
+          </button>
+        </div>
+        <div class="m-drawer-foot" id="mVer"></div>
+      </div>
+
       <!-- 左：插件管理 -->
      <section class="col" id="pluginCol">
        <div class="col-head">
@@ -491,7 +569,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '1.1.2';
+const PAGE_VERSION = '1.3.8';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -838,13 +916,44 @@ async function loadInnerHistory() {
   const d = await api('/api/inner/messages');
   const box = $('innerMsgs');
   box.innerHTML = '';
+  let n = 0;
   for (const m of (d.messages || [])) {
-    if (m.role === 'user') appendMsg('innerMsgs', 'user', m.content, '我');
+    if (m.role === 'user') { appendMsg('innerMsgs', 'user', m.content, '我'); n++; }
     else if (m.role === 'assistant' && m.content) {
       const el = appendMsg('innerMsgs', 'assistant', m.content, '内层 Agent');
       if (typeof setMsgHTML === 'function') setMsgHTML(el._text, m.content); // 历史中的文件路径也渲染成链接
+      n++;
     }
   }
+  updateWelcome(n === 0);
+}
+// 空对话时显示欢迎页（ChatGPT 风格），有消息后隐藏
+function updateWelcome(empty) {
+  let w = $('welcome');
+  if (empty) {
+    if (!w) {
+      w = document.createElement('div');
+      w.id = 'welcome';
+      w.innerHTML = '<div class="w-title">有什么可以帮忙？</div><div class="w-sub">给 agent 下达任务，它将自动调用工具完成</div>';
+      $('innerMsgs').appendChild(w);
+    }
+  } else if (w) w.remove();
+}
+
+// ==================== 移动端菜单 + 新对话 ====================
+function openMobileMenu() {
+  $('mDrawer').classList.add('open');
+  $('mOverlay').classList.add('open');
+}
+function closeMobileMenu() {
+  $('mDrawer').classList.remove('open');
+  $('mOverlay').classList.remove('open');
+}
+// 新对话：不弹确认（旧内容自动归档落盘，不丢失）
+async function newChat() {
+  if (innerBusy) { toast('执行中，请稍候再开新对话'); return; }
+  const d = await api('/api/inner/reset', { method: 'POST' });
+  if (d.success) { await loadInnerHistory(); toast('新对话已开启'); $('innerInput').focus(); }
 }
 function jumpScroll(boxId, pos) {
   const box = $(boxId);
@@ -1032,6 +1141,7 @@ function appendMsg(boxId, cls, text, who) {
   d.appendChild(t);
   d._text = t;
   box.appendChild(d);
+  if (boxId === 'innerMsgs') { const w = $('welcome'); if (w) w.remove(); } // 有真实消息即隐藏欢迎页
   scrollBottom(boxId);
   return d;
 }
@@ -1121,6 +1231,9 @@ function renderProposals() {
   $('approvalBar').classList.toggle('visible', proposals.length > 0);
   $('approvalPanel').innerHTML = proposalsHtml();
   if (proposals.length) $('approvalPanel').classList.add('open');
+  // 移动端菜单徽标同步
+  const mb = $('mApBadge');
+  if (mb) { mb.textContent = proposals.length; mb.classList.toggle('show', proposals.length > 0); }
   // 审批弹窗（移动端主入口）+ header 徽标
   $('approvalListMobi').innerHTML = proposals.length ? proposalsHtml() : '<div class="hint">当前没有待审批的插件修改建议。</div>';
   const badge = $('apBadge');
@@ -1536,6 +1649,7 @@ window.addEventListener('pagehide', () => { try { navigator.sendBeacon('/api/bye
 
 // ==================== 启动 ====================
 detectMobileMode();
+$('mVer').textContent = 'wsl agent v' + PAGE_VERSION;
 loadHealth();
 loadPlugins();
 loadProposals();
