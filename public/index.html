@@ -194,7 +194,6 @@
   body.mobile-mode .col.collapsed { display: none; }
   body.mobile-mode .scroll-nav { right: 8px; }
   body.mobile-mode .scroll-nav button { width: 36px; height: 36px; font-size: 15px; }
-  body.mobile-mode .hist-drawer { width: 100vw; max-width: 100vw; left: -100vw; }
   body.mobile-mode header { height: 48px; padding: 0 8px; gap: 6px; }
   body.mobile-mode header .logo { font-size: 14px; }
   body.mobile-mode header .hd-btn { padding: 4px 8px; font-size: 11px; gap: 3px; border-radius: 6px; }
@@ -204,11 +203,6 @@
   body.mobile-mode .composer { padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   body.mobile-mode .composer textarea { font-size: 16px; min-height: 48px; }
   body.mobile-mode .composer button { width: 40px; height: 40px; }
-  body.mobile-mode .hist-item { padding: 12px 14px; }
-  body.mobile-mode .hist-item-icon { width: 36px; height: 36px; font-size: 14px; }
-  body.mobile-mode .hist-item-name { font-size: 14px; }
-  body.mobile-mode .hist-item-meta { font-size: 12px; }
-  body.mobile-mode .hist-search input { font-size: 16px; padding: 10px 12px; }
   body.mobile-mode #innerCol { padding-left: 0; padding-right: 0; }
 
   /* ---- 图标优化 ---- */
@@ -218,36 +212,7 @@
   .composer button svg { width: 18px; height: 18px; }
   .busy-tip svg { animation: pulse 1.5s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
-
-  /* ---- 历史对话抽屉 ---- */
-  .hist-drawer { position: fixed; top: 0; left: -360px; width: 340px; max-width: 85vw; height: 100vh; background: var(--surface); z-index: 100; box-shadow: 4px 0 20px rgba(0,0,0,.25); transition: left .25s cubic-bezier(.4,0,.2,1); display: flex; flex-direction: column; }
-  .hist-drawer.open { left: 0; }
-  .hist-drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 99; display: none; }
-  .hist-drawer-overlay.open { display: block; }
-  .hist-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, #1e293b, #334155); color: #fff; flex-shrink: 0; }
-  .hist-head h3 { font-size: 15px; font-weight: 700; flex: 1; }
-  .hist-head button { background: rgba(255,255,255,.15); border: none; color: #e2e8f0; border-radius: 8px; width: 32px; height: 32px; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
-  .hist-head button:hover { background: rgba(255,255,255,.25); }
-  .hist-search { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-  .hist-search input { width: 100%; border: 2px solid var(--border); border-radius: 10px; padding: 9px 12px; font-size: 14px; outline: none; background: var(--bg); color: var(--text); }
-  .hist-search input:focus { border-color: var(--primary); }
-  .hist-list { flex: 1; overflow-y: auto; padding: 8px 0; }
-  .hist-item { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; border-bottom: 1px solid var(--surface-2); transition: background .15s; }
-  .hist-item:hover { background: var(--surface-2); }
-  .hist-item.active { background: #eff6ff; border-left: 3px solid var(--primary); padding-left: 13px; }
-  .hist-item-icon { width: 36px; height: 36px; border-radius: 50%; background: var(--surface-3); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; }
-  .hist-item.cur .hist-item-icon { background: var(--primary); color: #fff; }
-  .hist-item-body { flex: 1; min-width: 0; }
-  .hist-item-name { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .hist-item-meta { font-size: 11px; color: var(--text-ter); margin-top: 2px; }
-  .hist-item-preview { font-size: 11px; color: var(--text-sec); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-height: 32px; }
-  .hist-item-del { background: none; border: none; color: var(--text-ter); cursor: pointer; font-size: 16px; padding: 4px 6px; border-radius: 6px; flex-shrink: 0; }
-  .hist-item-del:hover { color: var(--danger); background: #fef2f2; }
-  .hist-empty { padding: 40px 16px; text-align: center; color: var(--text-ter); font-size: 13px; }
-  /* 消息时间戳行 */
-  .msg-row { display: flex; flex-direction: column; gap: 2px; }
-  .msg-row .who-row { display: flex; align-items: center; justify-content: space-between; }
-</style>
+ </style>
 </head>
 <body>
 <div id="app">
@@ -257,10 +222,6 @@
      <span class="hd-tag" id="tagInner">内层：未配置</span>
      <span class="hd-tag" id="tagOc">OpenCode：检测中…</span>
        <span class="grow"></span>
-        <button class="hd-btn" id="hdHistory" onclick="openHistDrawer()" title="查看历史对话（可搜索、切换、删除）">
-         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-         历史
-        </button>
         <button class="hd-btn" id="hdApproval" onclick="openApprovalMobi()" title="Agent 插件改进建议审批（有待审批项时高亮）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
         审批<span id="apBadge">0</span>
@@ -279,21 +240,7 @@
        </button>
      </header>
 
-    <main>
-      <!-- 历史对话抽屉 -->
-      <div class="hist-drawer-overlay" id="histDrawerOverlay" onclick="closeHistDrawer()"></div>
-      <div class="hist-drawer" id="histDrawer">
-        <div class="hist-head">
-          <h3>历史对话</h3>
-          <span style="font-size:11px;color:#94a3b8" id="histCount"></span>
-          <button onclick="closeHistDrawer()" title="关闭">✕</button>
-        </div>
-        <div class="hist-search">
-          <input id="histSearchInput" type="text" placeholder="搜索对话（标题+内容）…" oninput="filterHistList(this.value)">
-        </div>
-        <div class="hist-list" id="histList"></div>
-      </div>
-
+     <main>
       <!-- 左：插件管理 -->
      <section class="col" id="pluginCol">
        <div class="col-head">
@@ -319,15 +266,11 @@
         <span>HWJ agent</span>
          <span class="hint" id="innerModelTag"></span>
          <span class="hint" id="tokBadge" style="display:none;color:#059669" title="本会话真实 token 用量（API 返回，含缓存命中）；口径为每次调用全量重发上下文的计费累计"></span>
-        <span class="grow" style="flex:1"></span>
-        <button class="mini-btn" onclick="window.open('/process','_blank')" title="新页打开完整执行过程（全部插件调用的完整入参与结果）">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          过程
-        </button>
-        <button class="mini-btn" onclick="resetInnerChat()" title="归档当前对话并开启新会话（旧对话在「历史对话」可找回）">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;vertical-align:-2px"><path d="M12 5v14M5 12h14"/></svg>
-          新会话
-        </button>
+         <span class="grow" style="flex:1"></span>
+         <button class="mini-btn" onclick="window.open('/process','_blank')" title="新页打开完整执行过程（全部插件调用的完整入参与结果）">
+           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+           过程
+         </button>
         <button class="toggle-btn" onclick="toggleCol('innerCol')" title="折叠/展开">✕</button>
       </div>
       <div class="chat-body" id="innerMsgs"></div>
@@ -903,131 +846,6 @@ async function loadInnerHistory() {
     }
   }
 }
-async function resetInnerChat() {
-  if (!confirm('开启新会话？（当前对话归档到「历史对话」，随时可点回；插件与记忆不受影响）')) return;
-  const d = await api('/api/inner/reset', { method: 'POST' });
-  if (d.success) { await loadInnerHistory(); toast('已开启新会话'); }
-}
-
-// ==================== 历史对话抽屉 ====================
-let sessList = [], sessCurrent = '', histFiltered = [];
-// 缓存所有会话的完整消息（用于文本搜索）
-let sessMsgCache = {};
-async function openHistDrawer() {
-  await loadSessions();
-  renderHistList();
-  $('histDrawer').classList.add('open');
-  $('histDrawerOverlay').classList.add('open');
-  $('histSearchInput').value = '';
-  filterHistList('');
-}
-function closeHistDrawer() {
-  $('histDrawer').classList.remove('open');
-  $('histDrawerOverlay').classList.remove('open');
-}
-async function loadSessions() {
-  const d = await api('/api/sessions');
-  sessList = d.sessions || [];
-  sessCurrent = d.current || '';
-  $('histCount').textContent = sessList.length + ' 条';
-}
-function formatTime(ts) {
-  const d = new Date(ts);
-  const now = new Date();
-  const diff = now - d;
-  if (diff < 60000) return '刚刚';
-  if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
-  if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
-  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
-}
-// 获取会话预览文本（前2条user消息的摘要）
-async function getSessionPreview(id) {
-  if (sessMsgCache[id]) return sessMsgCache[id];
-  try {
-    const d = await api('/api/sessions/get?i=' + encodeURIComponent(id));
-    if (d.messages) {
-      const users = d.messages.filter(m => m.role === 'user').map(m => m.content.trim()).slice(0, 2);
-      sessMsgCache[id] = users.join('\n');
-      return sessMsgCache[id];
-    }
-  } catch {}
-  return '';
-}
-function getPreviewText(msgStr) {
-  if (!msgStr) return '';
-  const lines = msgStr.split('\n').filter(l => l.trim());
-  return lines.slice(0, 2).map(l => l.trim().slice(0, 60)).join(' | ');
-}
-function renderHistList(filter) {
-  const box = $('histList');
-  const q = (filter || '').toLowerCase().trim();
-  // 如果有搜索词，加载所有匹配会话的消息进行文本搜索
-  const loadAndRender = async () => {
-    histFiltered = sessList.filter(s => {
-      if (!q) return true;
-      // 先检查标题匹配
-      if ((s.name || '').toLowerCase().includes(q) || s.id.includes(q)) return true;
-      // 再检查消息内容匹配（异步加载）
-      const preview = sessMsgCache[s.id] || '';
-      if (preview.toLowerCase().includes(q)) return true;
-      return false;
-    });
-    if (histFiltered.length === 0) {
-      box.innerHTML = '<div class="hist-empty">暂无匹配的对话</div>';
-      return;
-    }
-    // 并行加载预览文本
-    const renderItems = await Promise.all(histFiltered.map(async s => {
-      const name = s.name || '未命名';
-      const time = formatTime(s.ts);
-      const msgs = s.n || 0;
-      const cur = s.id === sessCurrent ? ' active cur' : '';
-      let preview = sessMsgCache[s.id];
-      if (!preview) {
-        try {
-          const d = await api('/api/sessions/get?i=' + encodeURIComponent(s.id));
-          if (d.messages) {
-            preview = d.messages.filter(m => m.role === 'user').map(m => m.content.trim()).join('\n');
-            sessMsgCache[s.id] = preview;
-          }
-        } catch {}
-      }
-      const previewText = getPreviewText(preview);
-      return `<div class="hist-item${cur}" onclick="selectHistSession('${esc(s.id)}')">
-        <div class="hist-item-icon">${s.id === sessCurrent ? '●' : '💬'}</div>
-        <div class="hist-item-body">
-          <div class="hist-item-name">${esc(name)}</div>
-          ${previewText ? `<div class="hist-item-preview">${esc(previewText)}</div>` : ''}
-          <div class="hist-item-meta">${time} · ${msgs} 条消息</div>
-        </div>
-        ${s.id !== sessCurrent ? `<button class="hist-item-del" onclick="event.stopPropagation();delHistSession('${esc(s.id)}')" title="删除">✕</button>` : ''}
-      </div>`;
-    }));
-    box.innerHTML = renderItems.join('');
-  };
-  loadAndRender();
-}
-function filterHistList(val) { renderHistList(val); }
-async function selectHistSession(id) {
-  const d = await api('/api/sessions/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
-  if (d.success) {
-    sessCurrent = d.current;
-    await loadInnerHistory();
-    closeHistDrawer();
-    toast('已切换会话');
-  }
-}
-async function delHistSession(id) {
-  const s = sessList.find(x => x.id === id);
-  if (!confirm(`删除会话「${s ? s.name : id}」及其全部聊天记录？`)) return;
-  const d = await api('/api/sessions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
-  if (d.success) {
-    await loadInnerHistory();
-    await loadSessions();
-    renderHistList($('histSearchInput').value);
-    toast('会话已删除');
-  }
-}
 function jumpScroll(boxId, pos) {
   const box = $(boxId);
   box.scrollTo({ top: pos === Infinity ? box.scrollHeight : pos, behavior: 'smooth' });
@@ -1126,7 +944,6 @@ async function innerSend() {
     input.disabled = false;
     $('innerSendBtn').style.display = 'flex';
     $('stopBtn').classList.remove('show');
-    loadSessions(); // 会话名按首条消息更新
     $('innerBusy').style.display = 'none';
     input.focus();
   }
