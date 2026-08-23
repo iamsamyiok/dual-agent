@@ -203,6 +203,31 @@ async function runTask(input, ctx) {
       ui.printInfo('检测到拒绝后催促，已注入任务对齐指令');
     }
   }
+  // 记忆预取（v0.9.31，对齐 Hermes 启动即注入的 push 模式；与 server 逐字对齐）：
+  // 任务开始前用用户消息跨层检索（语义 recall + 任务归档 archive_search），命中即注入消息尾部
+  // ——pull 模型下模型不主动 search 的遵循度问题由此根治；整体 4s 超时保护，失败/为空静默跳过
+  try {
+    const prefetch = await Promise.race([
+      (async () => {
+        const q = String(input || '').slice(0, 120);
+        const emptyHit = s => !s || /为空|没有匹配|没有标签/.test(String(s).slice(0, 60));
+        const trim = s => String(s).split('\n').slice(0, 8).join('\n').slice(0, 900);
+        const [vec, arc] = await Promise.all([
+          plugins.runPlugin('memory', { action: 'recall', query: q, top_k: 3 }, { cwd: WS, dataDir: DATA_DIR }).catch(() => ''),
+          plugins.runPlugin('memory', { action: 'archive_search', query: q }, { cwd: WS, dataDir: DATA_DIR }).catch(() => '')
+        ]);
+        const parts = [];
+        if (!emptyHit(vec)) parts.push(`【语义记忆】\n${trim(vec)}`);
+        if (!emptyHit(arc)) parts.push(`【历史任务】\n${trim(arc)}`);
+        return parts.length ? `\n\n[框架预取·相关记忆] 以下是自动检索到的与本任务相关的既有记忆与历史任务（仅供参考，与本任务无关时必须忽略，禁止被旧任务带偏目标）：\n${parts.join('\n')}\n需要更多细节可继续用 memory recall / archive_search 检索。` : '';
+      })(),
+      new Promise(r => setTimeout(() => r(''), 4000))
+    ]);
+    if (prefetch) {
+      finalMsg += prefetch;
+      ui.printInfo('已预取相关记忆与历史任务注入上下文');
+    }
+  } catch { /* 预取失败不影响任务 */ }
   msgs.push({ role: 'user', content: finalMsg });
   persistSession(ctx.ws, msgs);
 
@@ -436,6 +461,11 @@ async function runTask(input, ctx) {
         ui.printInfo(`[交付核验] 发现 ${gaps.length} 项缺口，自动返修（第 ${r + 1}/${MAX_REPAIR} 轮）`);
         lastAnswer = await withTaskResume(runInner, { onInfo: ev => handleEvent(ev), label: '返修任务' });
       }
+    }
+    // 自动归档（v0.9.31，对齐 Hermes 会话归档静默写入；与 server 逐字对齐）：
+    // 任务结束即把 用户消息+最终交付 归档到 memory-archive.jsonl，供后续任务 archive_search 检索；异步不阻塞交付
+    if (String(lastAnswer || '').trim()) {
+      plugins.runPlugin('memory', { action: 'archive_save', user: String(input || ''), finalText: String(lastAnswer || '').slice(0, 4000) }, { cwd: WS, dataDir: DATA_DIR }).catch(() => {});
     }
     flushText();
     persistSession(ctx.ws, msgs);

@@ -183,6 +183,51 @@ function clearEmbConfig() {
     assert.ok(/长期记忆/.test(l));
   });
 
+  console.log('== P2 框架接线 e2e（hwj --script MOCK 全链路） ==');
+  // 独立隔离环境：任务1 交付后自动归档 → 任务2 启动预取命中注入
+  const { spawn } = require('child_process');
+  const E2E = path.join(TMP, 'e2e');
+  const E2E_DATA = path.join(E2E, 'data');
+  const E2E_WS = path.join(E2E, 'ws');
+  fs.mkdirSync(E2E_DATA, { recursive: true });
+  fs.mkdirSync(E2E_WS, { recursive: true });
+  const E2E_ENV = {
+    ...process.env,
+    DUAL_AGENT_MOCK: '1',
+    DUAL_AGENT_DATA: E2E_DATA,
+    DUAL_AGENT_WS_ROOT: E2E_WS,
+    DUAL_AGENT_PLUGINS_DIR: path.join(ROOT, 'plugins')
+  };
+  const runScript = (msg) => new Promise((resolve) => {
+    const p = spawn(process.execPath, [path.join(ROOT, 'hwj', 'hwj.js'), '--script', msg], {
+      env: E2E_ENV, stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let out = '';
+    p.stdout.on('data', d => out += d);
+    p.stderr.on('data', d => out += d);
+    p.on('close', code => resolve({ code, out }));
+  });
+  await t('任务1（MOCK）完成后自动归档 user+交付', async () => {
+    const r = await runScript('超滤膜压差处理方案');
+    assert.strictEqual(r.code, 0, r.out.slice(-400));
+    const arcFp = path.join(E2E_WS, 'default', 'memory-archive.jsonl');
+    assert.ok(fs.existsSync(arcFp), '归档文件未生成');
+    const lines = fs.readFileSync(arcFp, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(lines.length >= 1);
+    assert.ok(String(lines[0].user).includes('超滤膜压差'), '归档应含用户消息');
+    assert.ok(String(lines[0].finalText || '').length > 0, '归档应含交付文本');
+  });
+  await t('任务2 启动预取命中归档并注入上下文', async () => {
+    const r = await runScript('超滤 压差又升高了怎么办');
+    assert.strictEqual(r.code, 0, r.out.slice(-400));
+    assert.ok(/已预取相关记忆/.test(r.out), '应打印预取 info：' + r.out.slice(0, 300));
+    const sessFp = path.join(E2E_WS, 'default', 'hwj-messages.json');
+    const sess = JSON.parse(fs.readFileSync(sessFp, 'utf8'));
+    const userMsgs = sess.filter(m => m.role === 'user');
+    const hit = userMsgs.find(m => /框架预取·相关记忆/.test(String(m.content)) && /历史任务/.test(String(m.content)));
+    assert.ok(hit, '第二条任务消息应含预取注入的历史任务');
+  });
+
   embServer.closeAllConnections && embServer.closeAllConnections();
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

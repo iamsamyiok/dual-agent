@@ -199,6 +199,9 @@ module.exports = {
   - `recall` 混合检索：稠密余弦 + BM25 稀疏两路召回 → RRF 倒数排名融合（k=60）；支持 `tags` 前置过滤与 `mode`（hybrid/vector/keyword）；**未配置 embedding 自动降级纯关键词，功能不阻断**
   - Embedding 配置：网页版设置面板或 hwj `/config` 向导的「Embedding API」段（OpenAI 兼容 `/embeddings`，如硅基流动 `BAAI/bge-m3`），存 `.data/config.json` 与内层 API 同文件
   - 规模建议：Int8 量化后每条 ~4KB，1 万条内全量加载毫秒级；更大规模建议按工作区分库
+- **框架级 push 注入与自动归档**（v0.9.31，对齐 Hermes 全对话生命周期记忆时序；server 与 hwj 同步生效）
+  - **启动预取**：任务开始前用用户消息自动跨层检索（语义 recall top3 + 任务归档），命中即注入消息尾部并提示"已预取相关记忆"——pull 模型下模型不主动 search 的遵循度问题由此根治；整体 4s 超时保护，检索失败/为空静默跳过
+  - **自动归档**：任务交付后自动把 用户消息+最终交付 归档进 memory-archive.jsonl（异步不阻塞交付），每个任务天然进入归档库，无需手动 archive_save
 
 ## 上下文预算管理
 
