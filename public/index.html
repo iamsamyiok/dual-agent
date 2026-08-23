@@ -75,9 +75,16 @@
   .composer .stop-btn.show { display: flex; }
   body { overflow-x: hidden; }
 
-  /* ---- 会话标签条 ---- */
-  #sessRail { width: 40px; flex-shrink: 0; background: #1e293b; display: flex; flex-direction: column; align-items: center; padding: 10px 0; gap: 8px; overflow-y: auto; scrollbar-width: none; }
+  /* ---- 会话标签条（移动端隐藏，桌面端可见） ---- */
+  #sessRail { width: 44px; flex-shrink: 0; background: #1e293b; display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 8px; overflow-y: auto; scrollbar-width: none; border-radius: 0; }
   #sessRail::-webkit-scrollbar { display: none; }
+  #sessRail .sr-add { width: 32px; height: 32px; border-radius: 50%; border: 1.5px dashed #64748b; color: #94a3b8; background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background .15s; }
+  #sessRail .sr-add:hover { background: rgba(255,255,255,.08); }
+  #sessRail .sr-tab { width: 32px; height: 32px; border-radius: 50%; border: none; background: #334155; color: #cbd5e1; font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background .15s, transform .1s; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; }
+  #sessRail .sr-tab span { display: block; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  #sessRail .sr-tab.cur { background: #3b82f6; color: #fff; box-shadow: 0 0 0 2px #1e293b; }
+  #sessRail .sr-tab:active { transform: scale(.9); }
+  #sessRail .sr-tab[title]:hover::after { content: attr(title); position: absolute; left: 44px; background: #1e293b; color: #e2e8f0; padding: 4px 8px; border-radius: 6px; font-size: 11px; white-space: nowrap; z-index: 30; pointer-events: none; }
   #sessRail .sr-add { width: 30px; height: 30px; border-radius: 50%; border: 1.5px dashed #64748b; color: #94a3b8; background: none; font-size: 20px; line-height: 1; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: background .15s; }
   #sessRail .sr-add:hover { background: rgba(255,255,255,.08); }
   #sessRail .sr-tab { width: 32px; height: 32px; border-radius: 50%; border: none; background: #334155; color: #cbd5e1; font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background .15s, transform .1s; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; }
@@ -203,7 +210,18 @@
   body.mobile-mode .chat-body { padding: 12px; }
   body.mobile-mode .col { display: flex; flex-direction: column; min-height: 0; }
   body.mobile-mode .col.collapsed { display: none; }
-  body.mobile-mode #sessRail { width: 40px; }
+  /* ---- 折叠按钮（右侧边缘触发会话栏弹出） ---- */
+  .sess-toggle { position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 28px; height: 64px; background: #1e293b; border-radius: 0 10px 10px 0; display: none; align-items: center; justify-content: center; cursor: pointer; z-index: 15; box-shadow: 2px 0 8px rgba(0,0,0,.2); transition: background .2s; }
+  .sess-toggle:hover { background: #334155; }
+  .sess-toggle svg { width: 16px; height: 16px; color: #e2e8f0; }
+  .sess-toggle.open svg { transform: rotate(180deg); }
+  body.mobile-mode #sessRail { display: none; width: 260px; position: absolute; left: -260px; top: 0; bottom: 0; z-index: 30; box-shadow: 4px 0 16px rgba(0,0,0,.3); border-radius: 0; padding: 16px 0; align-items: flex-start; }
+  body.mobile-mode #sessRail.open { display: flex; left: 0; }
+  body.mobile-mode .sess-toggle { display: flex; }
+  body.mobile-mode #innerCol { padding-left: 0; }
+  body.mobile-mode #sessRail .sr-add { width: 44px; height: 44px; font-size: 20px; margin: 0 0 8px 0; }
+  body.mobile-mode #sessRail .sr-tab { width: 44px; height: 44px; font-size: 11px; border-radius: 8px; }
+  body.mobile-mode #sessRail .sr-tab span { font-size: 11px; padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   body.mobile-mode .scroll-nav { right: 8px; }
   body.mobile-mode .scroll-nav button { width: 36px; height: 36px; font-size: 15px; }
 
@@ -244,8 +262,13 @@
     </header>
 
    <main>
-     <!-- 左缘细条：会话标签（点击切换 / 长按删除 / + 新建） -->
-     <nav id="sessRail" title="会话标签：点击切换，长按删除"></nav>
+      <!-- 折叠按钮：点击弹出/收起会话标签栏（移动端） -->
+      <div class="sess-toggle" id="sessToggle" onclick="toggleSessionRail()" title="会话列表">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+      </div>
+
+      <!-- 左缘细条：会话标签（点击切换 / 长按删除 / + 新建） -->
+      <nav id="sessRail" title="会话标签：点击切换，长按删除"></nav>
 
      <!-- 左：插件管理 -->
      <section class="col" id="pluginCol">
@@ -862,8 +885,22 @@ async function resetInnerChat() {
   if (d.success) { await loadInnerHistory(); loadSessions(); toast('已开启新会话'); }
 }
 
-// ==================== 会话标签条（左侧细条：切换/长按删除/新建） ====================
+  // ==================== 会话标签条（左侧可折叠面板） ====================
 let sessList = [], sessCurrent = '';
+let sessRailOpen = false;
+async function toggleSessionRail() {
+  const rail = $('sessRail');
+  const tog = $('sessToggle');
+  sessRailOpen = !sessRailOpen;
+  if (sessRailOpen) {
+    await loadSessions();
+    rail.classList.add('open');
+    tog.classList.add('open');
+  } else {
+    rail.classList.remove('open');
+    tog.classList.remove('open');
+  }
+}
 async function loadSessions() {
   const d = await api('/api/sessions');
   sessList = d.sessions || [];
@@ -872,21 +909,29 @@ async function loadSessions() {
 }
 function renderSessRail() {
   const rail = $('sessRail');
+  // 清除旧内容但保留 .sr-list 容器（如有）
+  rail.innerHTML = '';
+  // 添加按钮
   const addBtn = document.createElement('button');
   addBtn.className = 'sr-add';
-  addBtn.textContent = '＋';
+  addBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:18px;height:18px"><path d="M12 5v14M5 12h14"/></svg>';
   addBtn.title = '新建会话';
   addBtn.onclick = newSession;
-  rail.innerHTML = '';
   rail.appendChild(addBtn);
+  // 分隔线
+  const sep = document.createElement('div');
+  sep.style.cssText = 'width:24px;height:1px;background:#334155;margin:4px 0;flex-shrink:0;';
+  rail.appendChild(sep);
+  // 会话列表
   for (const s of sessList) {
     const b = document.createElement('button');
     b.className = 'sr-tab' + (s.id === sessCurrent ? ' cur' : '');
-    b.textContent = (s.name || s.id).slice(0, 8);
+    const name = (s.name || s.id).slice(0, 6);
+    b.innerHTML = `<span>${name}</span>`;
     b.title = `${s.name || ''}（${s.n || 0} 条消息）\n点击切换 · 长按删除`;
-    // 点击切换；长按 600ms 弹删除（移动端 touch 与桌面 contextmenu 双通道）
+    // 点击切换；长按 600ms 弹删除
     let holdTimer = null, fired = false;
-    const startHold = e => { fired = false; holdTimer = setTimeout(() => { fired = true; deleteSession(s.id); }, 600); };
+    const startHold = () => { fired = false; holdTimer = setTimeout(() => { fired = true; deleteSession(s.id); }, 600); };
     const cancelHold = () => { if (holdTimer) clearTimeout(holdTimer); };
     b.addEventListener('touchstart', startHold, { passive: true });
     b.addEventListener('touchend', e => { cancelHold(); if (fired) { e.preventDefault(); e.stopPropagation(); } }, true);
@@ -915,6 +960,8 @@ async function switchSession(id) {
     }
     renderSessRail();
     toast('已切换会话');
+    // 切换后收起面板
+    if (sessRailOpen) toggleSessionRail();
   }
 }
 async function deleteSession(id) {
@@ -931,10 +978,9 @@ async function deleteSession(id) {
     }
     renderSessRail();
     toast('会话已删除');
+    if (sessRailOpen) toggleSessionRail();
   }
 }
-
-// ==================== 滚动导航（跳顶/跳底箭头） ====================
 function jumpScroll(boxId, pos) {
   const box = $(boxId);
   box.scrollTo({ top: pos === Infinity ? box.scrollHeight : pos, behavior: 'smooth' });
