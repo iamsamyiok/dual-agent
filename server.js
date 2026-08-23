@@ -6,7 +6,7 @@ const path = require('path');
 const url = require('url');
 const { EventEmitter } = require('events');
 
-const APP_VERSION = '1.3.1';
+const APP_VERSION = '1.3.2';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -179,26 +179,76 @@ function appendInnerLog(entry) {
   } catch (e) { console.log('[log] 内层日志追加失败:', e && e.message || e); } // 关键写失败可见
 }
 
-// ---------- 内层消息历史（按工作区分片落盘：workspaces/<ws>/inner-messages.json；切换换载而非清空，历史保留） ----------
+// ---------- 内层消息历史（v1.3.2 多会话：workspaces/<ws>/sessions/<id>.json + sessions-index.json） ----------
 let innerMessages = [];
 function wsMsgPath(ws) { return path.join(WS_ROOT, ws || currentWorkspace(), 'inner-messages.json'); }
+function sessionsDir(ws) { return path.join(WS_ROOT, ws || currentWorkspace(), 'sessions'); }
+function sessionsIndexPath(ws) { return path.join(WS_ROOT, ws || currentWorkspace(), 'sessions-index.json'); }
+function sessionFilePath(id) { return path.join(sessionsDir(), `${id}.json`); }
+
+// 会话索引读写（损坏自愈：索引坏 → 重建为单会话）
+function loadSessionsIndex() {
+  try {
+    const idx = JSON.parse(fs.readFileSync(sessionsIndexPath(), 'utf8'));
+    if (idx && Array.isArray(idx.list) && idx.list.length && idx.list.some(s => s.id === idx.current)) return idx;
+  } catch { /* 无索引或损坏 */ }
+  return null;
+}
+function saveSessionsIndex(idx) {
+  fs.mkdirSync(path.dirname(sessionsIndexPath()), { recursive: true });
+  fs.writeFileSync(sessionsIndexPath(), JSON.stringify(idx, null, 1), 'utf8');
+}
+function sessionMeta() {
+  const idx = loadSessionsIndex();
+  return idx || { current: 's1', seq: 1, list: [{ id: 's1', name: '会话 1', ts: Date.now() }] };
+}
+// 会话显示名：首条用户消息前 16 字（无则保留默认名）
+function sessionDisplayName(msgs, fallback) {
+  const first = msgs.find(m => m.role === 'user' && m.content && m.content.trim());
+  if (!first) return fallback;
+  return first.content.trim().replace(/\s+/g, ' ').slice(0, 16) || fallback;
+}
+
 function loadInnerMessages() {
-  try { innerMessages = JSON.parse(fs.readFileSync(wsMsgPath(), 'utf8')) || []; }
-  catch {
-    innerMessages = [];
-    // 一次性迁移：0.4.0 及之前的全局会话归入当前工作区，迁移后改名防止重复吸入其他工作区
+  const idx = sessionMeta();
+  // 一次性迁移（v1.3.1 及之前）：单文件会话归入 s1
+  if (!loadSessionsIndex()) {
     try {
-      const legacy = JSON.parse(fs.readFileSync(LEGACY_MSG_PATH, 'utf8'));
-      if (Array.isArray(legacy) && legacy.length) { innerMessages = legacy; persistInnerMessages(); }
+      const legacy = JSON.parse(fs.readFileSync(wsMsgPath(), 'utf8'));
+      if (Array.isArray(legacy) && legacy.length) {
+        fs.mkdirSync(sessionsDir(), { recursive: true });
+        fs.writeFileSync(sessionFilePath('s1'), JSON.stringify(legacy, null, 1), 'utf8');
+        idx.list[0].name = sessionDisplayName(legacy, '会话 1');
+      }
+      try { fs.renameSync(wsMsgPath(), wsMsgPath() + '.migrated'); } catch { /* 无旧文件 */ }
+    } catch { /* 无旧数据 */ }
+    // 更早版本（0.4.0 全局会话）迁入
+    try {
+      const legacy2 = JSON.parse(fs.readFileSync(LEGACY_MSG_PATH, 'utf8'));
+      if (Array.isArray(legacy2) && legacy2.length && !fs.existsSync(sessionFilePath('s1'))) {
+        fs.mkdirSync(sessionsDir(), { recursive: true });
+        fs.writeFileSync(sessionFilePath('s1'), JSON.stringify(legacy2, null, 1), 'utf8');
+        idx.list[0].name = sessionDisplayName(legacy2, '会话 1');
+      }
       fs.renameSync(LEGACY_MSG_PATH, LEGACY_MSG_PATH + '.migrated');
     } catch { /* 无旧数据 */ }
+    saveSessionsIndex(idx);
   }
+  try { innerMessages = JSON.parse(fs.readFileSync(sessionFilePath(idx.current), 'utf8')) || []; }
+  catch { innerMessages = []; }
 }
 function persistInnerMessages() {
   try {
     // 配对安全裁剪（v0.9.12 P0-1）：slice(-60) 切点落在 tool_calls 与 tool 结果之间
     // 会落盘悬空配对，下次调 API 直接 400 且无法自愈
-    fs.writeFileSync(wsMsgPath(), JSON.stringify(pairSafeTail(innerMessages, 60), null, 1));
+    const tail = pairSafeTail(innerMessages, 60);
+    fs.mkdirSync(sessionsDir(), { recursive: true });
+    fs.writeFileSync(sessionFilePath(sessionMeta().current), JSON.stringify(tail, null, 1));
+    // 索引同步（消息数 + 首条消息命名）
+    const idx = sessionMeta();
+    const it = idx.list.find(s => s.id === idx.current);
+    if (it) { it.n = tail.length; it.name = sessionDisplayName(tail, it.name); }
+    saveSessionsIndex(idx);
   }
   catch (e) { console.log('[persist] 内层会话落盘失败:', e && e.message || e); } // 关键写失败必须可见
 }
@@ -1103,6 +1153,7 @@ const server = http.createServer(async (req, res) => {
            rm(path.join(dir, 'process.md'));
            rm(path.join(dir, 'inner-usage.json'));
            rm(path.join(dir, 'sessions'));
+           rm(path.join(dir, 'sessions-index.json'));
          }
          rm(path.join(DATA_DIR, 'audit.json'));
          rm(path.join(DATA_DIR, 'snapshots'));
@@ -1206,11 +1257,76 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { success: true, messages: innerMessages.filter(m => m.role !== 'system').slice(-60) });
       return;
     }
+    // ---------- 会话管理（v1.3.2：延续不清空，明确新建才换新） ----------
+    if (p === '/api/sessions' && req.method === 'GET') {
+      const idx = sessionMeta();
+      json(res, 200, { success: true, current: idx.current, sessions: idx.list.slice().sort((a, b) => b.ts - a.ts) });
+      return;
+    }
+    if (p === '/api/sessions/new' && req.method === 'POST') {
+      if (innerLock) { json(res, 409, { success: false, error: '内层执行中，不能切换会话' }); return; }
+      const idx = sessionMeta();
+      idx.seq = (idx.seq || idx.list.length) + 1;
+      const id = `s${idx.seq}`;
+      idx.list.push({ id, name: `会话 ${idx.seq}`, ts: Date.now(), n: 0 });
+      idx.current = id;
+      saveSessionsIndex(idx);
+      innerMessages = [];
+      persistInnerMessages();
+      clearWorkspaceMemory(); // P12: 新会话不带旧任务记忆
+      json(res, 200, { success: true, current: id, sessions: idx.list.slice().sort((a, b) => b.ts - a.ts) });
+      return;
+    }
+    if (p === '/api/sessions/switch' && req.method === 'POST') {
+      if (innerLock) { json(res, 409, { success: false, error: '内层执行中，不能切换会话' }); return; }
+      const body = await readBody(req);
+      const id = String(body.id || '').trim();
+      const idx = sessionMeta();
+      if (!idx.list.some(s => s.id === id)) { json(res, 404, { success: false, error: '会话不存在' }); return; }
+      idx.current = id;
+      saveSessionsIndex(idx);
+      loadInnerMessages();
+      json(res, 200, { success: true, current: id, messages: innerMessages.filter(m => m.role !== 'system').slice(-60) });
+      return;
+    }
+    if (p === '/api/sessions/delete' && req.method === 'POST') {
+      if (innerLock) { json(res, 409, { success: false, error: '内层执行中，不能删除会话' }); return; }
+      const body = await readBody(req);
+      const id = String(body.id || '').trim();
+      const idx = sessionMeta();
+      const i = idx.list.findIndex(s => s.id === id);
+      if (i < 0) { json(res, 404, { success: false, error: '会话不存在' }); return; }
+      idx.list.splice(i, 1);
+      try { fs.rmSync(sessionFilePath(id), { force: true }); } catch { /* ignore */ }
+      // 删的是当前会话 → 切到最新会话；全删光则新建空会话
+      if (idx.current === id) {
+        if (idx.list.length) {
+          idx.list.sort((a, b) => b.ts - a.ts);
+          idx.current = idx.list[0].id;
+        } else {
+          idx.seq = (idx.seq || 0) + 1;
+          idx.current = `s${idx.seq}`;
+          idx.list.push({ id: idx.current, name: `会话 ${idx.seq}`, ts: Date.now(), n: 0 });
+        }
+      }
+      saveSessionsIndex(idx);
+      loadInnerMessages();
+      json(res, 200, { success: true, current: idx.current, sessions: idx.list.slice().sort((a, b) => b.ts - a.ts), messages: innerMessages.filter(m => m.role !== 'system').slice(-60) });
+      return;
+    }
     if (p === '/api/inner/reset' && req.method === 'POST') {
+      // v1.3.2 语义升级：清空 = 开启新会话（旧内容留在原会话可从左侧标签找回）
       if (innerLock) { json(res, 409, { success: false, error: '内层执行中，不能清空' }); return; }
-      clearInnerMessages();
+      const idx = sessionMeta();
+      idx.seq = (idx.seq || idx.list.length) + 1;
+      const id = `s${idx.seq}`;
+      idx.list.push({ id, name: `会话 ${idx.seq}`, ts: Date.now(), n: 0 });
+      idx.current = id;
+      saveSessionsIndex(idx);
+      innerMessages = [];
+      persistInnerMessages();
       clearWorkspaceMemory(); // P12: 同时清除工作区记忆
-      json(res, 200, { success: true });
+      json(res, 200, { success: true, current: id, sessions: idx.list.slice().sort((a, b) => b.ts - a.ts) });
       return;
     }
 

@@ -1,5 +1,7 @@
 package com.hwj.agent
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -16,6 +18,9 @@ import java.io.File
 class MainActivity : AppCompatActivity() {
     private lateinit var web: WebView
     private lateinit var splash: View
+    private var filePathCallback: android.webkit.ValueCallback<Array<Uri>>? = null
+
+    companion object { private const val FILE_CHOOSER_REQUEST = 10001 }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,7 +56,28 @@ class MainActivity : AppCompatActivity() {
                 if (url != null && url.startsWith(NodeRuntime.BASE_URL)) splash.visibility = View.GONE
             }
         }
-        web.webChromeClient = WebChromeClient()
+        web.webChromeClient = object : WebChromeClient() {
+            // 文件上传：<input type=file> 必须经此回调拉起系统选择器，否则点击无反应
+            override fun onShowFileChooser(
+                webView: WebView,
+                callback: android.webkit.ValueCallback<Array<Uri>>,
+                fileChooserParams: FileChooserParams
+            ): Boolean {
+                filePathCallback?.onReceiveValue(null) // 上一次未完结的选择作废
+                filePathCallback = callback
+                val intent = fileChooserParams.createIntent().apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                }
+                return try {
+                    startActivityForResult(intent, FILE_CHOOSER_REQUEST)
+                    true
+                } catch (e: ActivityNotFoundException) {
+                    filePathCallback = null
+                    callback.onReceiveValue(null)
+                    false
+                }
+            }
+        }
         // 文件下载/导出：存入 App 私有 Downloads 后拉起系统分享
         web.setDownloadListener(DownloadListener { url, _, _, mime, _ ->
             Thread { shareDownloaded(url, mime) }.start()
@@ -102,6 +128,18 @@ class MainActivity : AppCompatActivity() {
                 android.widget.Toast.makeText(this, "导出失败：${e.message}", android.widget.Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == FILE_CHOOSER_REQUEST) {
+            val cb = filePathCallback ?: return
+            filePathCallback = null
+            cb.onReceiveValue(
+                WebChromeClient.FileChooserParams.parseResult(resultCode, data)
+            )
+            return
+        }
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
     override fun onBackPressed() {

@@ -1822,7 +1822,26 @@ async function main() {
     assert.ok(r.success && r.current === 'default');
     const m = await (await fetch(base + '/api/inner/messages')).json();
     assert.ok(m.messages.some(x => x.role === 'user' && x.content === '演示'), '切回原工作区应恢复历史（旧版切换即销毁）');
-    assert.ok(fs.existsSync(path.join(TMP, 'ws-root', 'default', 'inner-messages.json')), '会话应按工作区分片落盘');
+    assert.ok(fs.existsSync(path.join(TMP, 'ws-root', 'default', 'sessions-index.json')), '会话索引应按工作区落盘');
+  });
+  await t('多会话：新建/切换/删除闭环（v1.3.2）', async () => {
+    const before = await (await fetch(base + '/api/sessions')).json();
+    const n0 = before.sessions.length;
+    // 新建 s_next
+    const nu = await (await fetch(base + '/api/sessions/new', { method: 'POST' })).json();
+    assert.ok(nu.success && nu.current !== before.current && nu.sessions.length === n0 + 1, '新建会话并切换');
+    const empty = await (await fetch(base + '/api/inner/messages')).json();
+    assert.equal(empty.messages.length, 0, '新会话应为空');
+    // 切回原会话：历史恢复
+    const sw = await (await fetch(base + '/api/sessions/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: before.current }) })).json();
+    assert.ok(sw.success && sw.current === before.current, '切回原会话');
+    assert.ok(sw.messages.some(x => x.role === 'user' && x.content === '演示'), '原会话历史完整恢复');
+    // 删除刚才新建的会话
+    const del = await (await fetch(base + '/api/sessions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: nu.current }) })).json();
+    assert.ok(del.success && del.sessions.length === n0 && del.current === before.current, '删除非当前会话后列表与当前不变');
+    // 切到不存在的会话 → 404
+    const bad = await (await fetch(base + '/api/sessions/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'nope' }) })).json();
+    assert.ok(!bad.success && bad.error, '切到不存在的会话应报错');
   });
   await t('工作区名非法被拒绝', async () => {
     const r = await (await fetch(base + '/api/workspace/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: '../evil' }) })).json();
