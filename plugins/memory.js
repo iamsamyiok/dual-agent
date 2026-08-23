@@ -1,16 +1,20 @@
 // @name memory
-// @desc 三层记忆系统：session（会话）/ short（近期）/ long（长期），支持自动检索与手动管理
+// @desc 五层记忆系统：session/short/long（日常）+ archive（任务归档全文检索）+ vector（语义向量记忆 remember/recall）
 // @essential true
 const fs = require('fs');
 const path = require('path');
 
 const MAX_SHORT = 20;
 const MAX_LONG = 20;
+const ARCHIVE_FILE = 'memory-archive.jsonl'; // 任务归档（user + finalText，JSONL 追加，无上限）
+const VECTOR_FILE = '.memory-vector.json';   // 语义记忆库（content + tags + Int8 量化稠密向量）
+const COS_MERGE = 0.85; // remember 自动合并阈值（对齐 Hermes 语义记忆）
 
 function memFiles(ctx) {
   return {
     short: path.join(ctx.cwd, '.memory-short.json'),
-    long: path.join(ctx.cwd, '.memory-long.json')
+    long: path.join(ctx.cwd, '.memory-long.json'),
+    vector: path.join(ctx.cwd, VECTOR_FILE)
   };
 }
 
@@ -99,24 +103,144 @@ function searchRanked(query, items) {
     .map(x => x.m);
 }
 
+// ---------- 归档层（对齐 Hermes state.db：全量任务原文，JSONL 追加 + BM25 全文检索） ----------
+function loadArchive(ctx) {
+  let raw = '';
+  try { raw = fs.readFileSync(path.join(ctx.cwd, ARCHIVE_FILE), 'utf8'); } catch { return []; }
+  return raw.split('\n').map(l => l.trim()).filter(Boolean)
+    .map(l => { try { const o = JSON.parse(l); return o && (o.user || o.finalText) ? o : null; } catch { return null; } })
+    .filter(Boolean);
+}
+
+function appendArchive(ctx, entry) {
+  const fp = path.join(ctx.cwd, ARCHIVE_FILE);
+  fs.mkdirSync(path.dirname(fp), { recursive: true });
+  fs.appendFileSync(fp, JSON.stringify(entry) + '\n', 'utf8');
+}
+
+// ---------- BM25（归档检索 + 语义记忆稀疏路共用；k1=1.5 b=0.75 标准参数） ----------
+// 与 searchRanked 的 TF-IDF 互补：BM25 带文档长度归一，长文档（归档 finalText）不虚高
+function bm25Search(query, docs, textOf, topN = 20) {
+  const qTokens = [...new Set(tokenize(query))];
+  if (!qTokens.length || !docs.length) return [];
+  const N = docs.length;
+  const docToks = docs.map(d => tokenize(textOf(d)));
+  const avgLen = docToks.reduce((s, t) => s + t.length, 0) / N || 1;
+  const df = new Map();
+  for (const toks of docToks) {
+    for (const t of new Set(toks)) if (qTokens.includes(t)) df.set(t, (df.get(t) || 0) + 1);
+  }
+  const k1 = 1.5, b = 0.75;
+  return docs.map((d, i) => {
+      const toks = docToks[i];
+      if (!toks.length) return { d, s: 0 };
+      const tf = new Map();
+      for (const t of toks) tf.set(t, (tf.get(t) || 0) + 1);
+      let s = 0;
+      for (const q of qTokens) {
+        const f = tf.get(q);
+        if (!f) continue;
+        const idf = Math.log(1 + (N - (df.get(q) || 0) + 0.5) / ((df.get(q) || 0) + 0.5));
+        s += idf * (f * (k1 + 1)) / (f + k1 * (1 - b + b * toks.length / avgLen));
+      }
+      return { d, s };
+    })
+    .filter(x => x.s > 0)
+    .sort((a, b2) => b2.s - a.s)
+    .slice(0, topN);
+}
+
+// ---------- 语义向量层（对齐 Hermes LanceDB 插件：稠密余弦 + 稀疏 BM25 + RRF 融合） ----------
+// 存储规模说明：Int8 量化后每条 ~4KB，1 万条 ≈ 40MB JSON，readFileSync 全量加载百 ms 级；
+// 超过 1 万条建议分工作区。模块不设缓存（插件支持热加载，缓存会失效），每次现读现算
+function loadVector(ctx) {
+  try {
+    const d = JSON.parse(fs.readFileSync(memFiles(ctx).vector, 'utf8'));
+    return Array.isArray(d.items) ? d : { items: [] };
+  } catch { return { items: [] }; }
+}
+
+function saveVector(ctx, data) {
+  return saveJSON(memFiles(ctx).vector, data);
+}
+
+// L2 归一化后 Int8 量化：值域压到 [-127,127]，文件体积比 float JSON 小 5 倍，top-N 排序几乎无损
+function quantize(vec) {
+  let norm = 0;
+  for (const v of vec) norm += v * v;
+  norm = Math.sqrt(norm) || 1;
+  return vec.map(v => Math.max(-127, Math.min(127, Math.round((v / norm) * 127))));
+}
+
+function cosInt8(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  if (!na || !nb) return 0;
+  return dot / Math.sqrt(na * nb);
+}
+
+// embedding 配置：读 .data/config.json 的 embedding 段（与内层 API 同一配置文件，网页版/hwj 共享）
+// 未配置返回 null（调用方降级关键词模式，功能不阻断）
+function readEmbeddingCfg(ctx) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(ctx.dataDir, 'config.json'), 'utf8'));
+    const e = cfg && cfg.embedding;
+    return (e && e.base_url && e.api_key && e.model) ? e : null;
+  } catch { return null; }
+}
+
+// OpenAI 兼容 /embeddings 调用（bge-m3 / text-embedding 等通用）；15s 超时
+async function embedTexts(texts, cfgE) {
+  const url = String(cfgE.base_url).replace(/\/+$/, '') + '/embeddings';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cfgE.api_key },
+    body: JSON.stringify({ model: cfgE.model, input: texts }),
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!res.ok) throw new Error(`embedding API HTTP ${res.status}：${(await res.text().catch(() => '')).slice(0, 200)}`);
+  const j = await res.json();
+  const arr = (j && j.data || []).map(x => x && x.embedding).filter(Array.isArray);
+  if (arr.length !== texts.length) throw new Error(`embedding 返回 ${arr.length} 条，期望 ${texts.length} 条`);
+  return arr;
+}
+
+// RRF 倒数排名融合（k=60 标准值）：两路排名值域不统一，用 1/(k+rank) 相加
+function rrfFuse(rankLists, topK) {
+  const K = 60;
+  const score = new Map();
+  for (const list of rankLists) {
+    list.forEach((id, r) => score.set(id, (score.get(id) || 0) + 1 / (K + r + 1)));
+  }
+  return [...score.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topK)
+    .map(([id]) => id);
+}
+
 module.exports = {
   params: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['save', 'search', 'list', 'delete', 'consolidate'],
-        description: '操作类型；consolidate=整理：相似短期记忆归并为一条长期记忆（释放容量）'
+        enum: ['save', 'search', 'list', 'delete', 'consolidate', 'archive_save', 'archive_search', 'remember', 'recall'],
+        description: 'save/search/list/delete=三层记忆管理；consolidate=短期归并为长期；archive_save=归档完整任务记录（用户消息+最终交付）；archive_search=BM25 全文检索历史任务归档；remember=写入长期语义记忆（经验/事实/方案，支持向量语义检索）；recall=语义混合检索（稠密向量+BM25 关键词 RRF 融合，embedding 未配置时自动降级关键词）'
       },
       level: {
         type: 'string',
-        enum: ['session', 'short', 'long'],
-        description: '记忆级别：session=会话级（不持久化）/ short=近期（任务摘要）/ long=长期（永久）'
+        enum: ['session', 'short', 'long', 'vector'],
+        description: '记忆级别：session=会话级（不持久化）/ short=近期（任务摘要）/ long=长期（永久）/ vector=语义记忆（remember 写入的条目）'
       },
       content: { type: 'string', description: '记忆内容（save 时必填）' },
       query: { type: 'string', description: '检索关键词（search 时必填）' },
       id: { type: 'number', description: '删除时的条目 ID' },
-      tags: { type: 'array', items: { type: 'string' }, description: '标签（save 时可选）' }
+      tags: { type: 'array', items: { type: 'string' }, description: '标签（save/remember 时可选；recall 时可作前置过滤）' },
+      user: { type: 'string', description: 'archive_save：用户原始消息' },
+      finalText: { type: 'string', description: 'archive_save：最终交付文本' },
+      top_k: { type: 'number', description: 'recall 返回条数（默认 5，上限 10）' },
+      mode: { type: 'string', enum: ['hybrid', 'vector', 'keyword'], description: 'recall 检索模式：hybrid=语义+关键词融合（默认）/ vector=仅语义 / keyword=仅关键词' }
     },
     required: ['action']
   },
@@ -292,9 +416,163 @@ module.exports = {
       return `已归并 ${clusters.length} 簇（近期 ${short.length} → ${keep.length} 条）：\n${mergedIds.join('\n')}`;
     }
 
+    // ========== archive_save：归档完整任务记录（框架收尾自动调用 / 模型手动归档） ==========
+    if (action === 'archive_save') {
+      const user = String(args.user || '').trim();
+      const finalText = String(args.finalText || '').trim();
+      if (!user && !finalText) throw new Error('user 与 finalText 至少一项非空');
+      appendArchive(ctx, {
+        ts: Date.now(),
+        taskId: args.taskId || null,
+        user: user.slice(0, 2000),
+        finalText: finalText.slice(0, 4000)
+      });
+      return `已归档 1 条任务记录（归档累计 ${loadArchive(ctx).length} 条，archive_search 可全文检索）`;
+    }
+
+    // ========== archive_search：BM25 全文检索历史任务归档 ==========
+    if (action === 'archive_search') {
+      const query = String(args.query || '').trim();
+      if (!query) throw new Error('query 为空');
+      const docs = loadArchive(ctx);
+      if (!docs.length) return '任务归档库为空';
+      const hits = bm25Search(query, docs, d => `${d.user || ''} ${d.finalText || ''}`, 10);
+      if (!hits.length) return `归档中没有匹配「${query}」的任务记录`;
+      const lines = hits.map(({ d }) => {
+        const when = new Date(d.ts).toISOString().slice(0, 16).replace('T', ' ');
+        const u = (d.user || '').replace(/\s+/g, ' ').slice(0, 60);
+        const f = (d.finalText || '').replace(/\s+/g, ' ').slice(0, 120);
+        return `[${when}] 问：${u}${(d.user || '').length > 60 ? '…' : ''}\n  答：${f}${(d.finalText || '').length > 120 ? '…' : ''}`;
+      });
+      return `归档匹配 ${hits.length} 条（BM25 相关度排序）：\n${lines.join('\n')}`;
+    }
+
+    // ========== remember：写入语义记忆（稠密向量 + 原文，供 recall 混合检索） ==========
+    if (action === 'remember') {
+      const content = String(args.content || '').trim();
+      if (!content) throw new Error('content 为空');
+      const data = loadVector(ctx);
+      const items = data.items;
+      // 精确重复直接拒绝（与 save 同策略）
+      const dup = items.find(it => it.content === content);
+      if (dup) return `语义记忆已存在（#${dup.id}），内容完全相同，无需重复写入`;
+
+      // embedding 可用则生成稠密向量（归一化 Int8 量化）
+      const cfgE = readEmbeddingCfg(ctx);
+      let dense = null;
+      let note = '未配置 embedding（.data/config.json 的 embedding 段），当前仅关键词可检索；配置后重新 remember 同条内容可启用语义检索';
+      if (cfgE) {
+        try {
+          // 渐进式 backfill：为无向量的存量条目补嵌（每次最多 10 条，与新内容合并成一次 API 调用）
+          // 场景：先无配置积累 sparse-only 记忆，后配置 embedding —— 存量逐步进入语义检索
+          const backfill = items.filter(it => !Array.isArray(it.dense)).slice(0, 10);
+          const [vNew, ...vOld] = await embedTexts([content, ...backfill.map(it => it.content)], cfgE);
+          dense = quantize(vNew);
+          backfill.forEach((it, i) => {
+            if (Array.isArray(vOld[i]) && vOld[i].length === vNew.length) it.dense = quantize(vOld[i]);
+          });
+          note = `语义+关键词双路可检索${backfill.length ? `（本次补嵌存量 ${backfill.length} 条）` : ''}`;
+        } catch (e) {
+          return `语义向量生成失败，本次未写入：${e && e.message || e}（可稍后重试，或检查 embedding 配置）`;
+        }
+      }
+
+      // 高相似自动合并（对齐 Hermes >0.85 LLM 合并；插件层无 LLM 访问权，用追加式合并保留全部信息）
+      if (dense) {
+        let best = null, bestS = 0;
+        for (const it of items) {
+          if (!Array.isArray(it.dense) || it.dense.length !== dense.length) continue;
+          const s = cosInt8(dense, it.dense);
+          if (s > bestS) { bestS = s; best = it; }
+        }
+        if (best && bestS > COS_MERGE) {
+          best.content = `${best.content}\n【补充】${content}`.slice(0, 1000);
+          best.ts = Date.now();
+          best.tags = [...new Set([...(best.tags || []), ...tags])].slice(0, 5);
+          best.merged = (best.merged || 0) + 1;
+          if (!saveVector(ctx, data)) return '语义记忆合并落盘失败：磁盘写入异常';
+          return `与 #${best.id} 高度相似（余弦 ${bestS.toFixed(2)} ≥ ${COS_MERGE}），已合并为补充条目（原文保留在 #${best.id}）`;
+        }
+      }
+
+      const item = { id: allocId(memFiles(ctx).vector), ts: Date.now(), content: content.slice(0, 1000), tags: tags.slice(0, 5), dense, merged: 0 };
+      items.push(item);
+      if (!saveVector(ctx, data)) return '语义记忆保存失败：磁盘写入异常';
+      return `已存入语义记忆 #${item.id}（${note}）：${content.slice(0, 50)}...`;
+    }
+
+    // ========== recall：语义混合检索（稠密余弦 + BM25 稀疏，RRF 融合；未配置 embedding 自动降级关键词） ==========
+    if (action === 'recall') {
+      const query = String(args.query || '').trim();
+      if (!query) throw new Error('query 为空');
+      const data = loadVector(ctx);
+      if (!data.items.length) return '语义记忆库为空（用 remember 写入后再检索）';
+
+      // tags 前置过滤（缩小检索范围，对齐 Hermes metadata 过滤提速）
+      const qTags = normTags(args.tags);
+      const pool = qTags.length ? data.items.filter(it => (it.tags || []).some(t => qTags.includes(t))) : data.items;
+      if (!pool.length) return `没有标签含 [${qTags.join(' ')}] 的语义记忆（recall 不带 tags 可全库检索）`;
+
+      const mode = ['hybrid', 'vector', 'keyword'].includes(args.mode) ? args.mode : 'hybrid';
+      const topK = Math.max(1, Math.min(Number(args.top_k) || 5, 10));
+      const byId = new Map(pool.map(it => [it.id, it]));
+
+      // 稀疏路：BM25
+      let sparseRank = [];
+      if (mode !== 'vector') {
+        sparseRank = bm25Search(query, pool, it => `${it.content} ${(it.tags || []).join(' ')}`, 20).map(x => x.d.id);
+      }
+      // 稠密路：embedding 余弦（配置缺失/失败时跳过，降级关键词）
+      let denseRank = [];
+      let modeNote = '';
+      if (mode !== 'keyword') {
+        const cfgE = readEmbeddingCfg(ctx);
+        if (!cfgE) {
+          modeNote = mode === 'vector' ? '（未配置 embedding，vector 模式不可用，已降级关键词）' : '（未配置 embedding，已降级纯关键词检索）';
+        } else {
+          try {
+            const [qv] = await embedTexts([query], cfgE);
+            const q = quantize(qv);
+            denseRank = pool
+              .filter(it => Array.isArray(it.dense) && it.dense.length === q.length)
+              .map(it => ({ id: it.id, s: cosInt8(q, it.dense) }))
+              .sort((a, b) => b.s - a.s)
+              .slice(0, 20)
+              .filter(x => x.s > 0.1)
+              .map(x => x.id);
+          } catch (e) {
+            modeNote = `（语义路调用失败已降级关键词：${e && e.message || e}）`;
+          }
+        }
+      }
+
+      const fusedIds = mode === 'keyword' || (mode === 'hybrid' && !denseRank.length && sparseRank.length)
+        ? sparseRank.slice(0, topK)
+        : rrfFuse([sparseRank, denseRank], topK);
+      if (!fusedIds.length) {
+        return `语义记忆中没有匹配「${query}」的条目${modeNote}`;
+      }
+      const lines = fusedIds.map(id => {
+        const it = byId.get(id);
+        if (!it) return '';
+        const tagStr = (it.tags || []).length ? ` [${it.tags.join(' ')}]` : '';
+        const vecStr = Array.isArray(it.dense) ? '语义' : '关键词';
+        return `#${it.id}${tagStr} (${vecStr}) ${it.content.replace(/\n/g, ' ').slice(0, 120)}`;
+      }).filter(Boolean);
+      return `语义记忆匹配 ${lines.length} 条（${mode} 模式${modeNote}）：\n${lines.join('\n')}`;
+    }
+
     // ========== delete ==========
     if (action === 'delete') {
       const id = Number(args.id);
+      if (level === 'vector') {
+        const data = loadVector(ctx);
+        const idx = data.items.findIndex(m => m.id === id);
+        if (idx < 0) return `#${id} 不存在于语义记忆`;
+        data.items.splice(idx, 1);
+        saveVector(ctx, data);
+        return `已删除语义记忆 #${id}`;
+      }
       const target = level === 'long' ? files.long : files.short;
       const arr = loadJSON(target, []);
       const idx = arr.findIndex(m => m.id === id);
@@ -304,6 +582,6 @@ module.exports = {
       return `已删除 #${id}`;
     }
     
-    return `未知操作：${action}（支持 save/search/list/delete）`;
+    return `未知操作：${action}（支持 save/search/list/delete/consolidate/archive_save/archive_search/remember/recall）`;
   }
 };

@@ -6,7 +6,7 @@ const path = require('path');
 const url = require('url');
 const { EventEmitter } = require('events');
 
-const APP_VERSION = '0.9.28';
+const APP_VERSION = '0.9.30';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -35,7 +35,7 @@ process.on('uncaughtException', e => console.log('[uncaught]', e && e.stack || e
 process.on('unhandledRejection', e => console.log('[unhandled]', e && (e.stack || e) || e));
 
 // ---------- 配置（内层 OpenAI 兼容 API；key 仅存本机） ----------
-const DEFAULT_CONFIG = { inner: { base_url: '', api_key: '', model: '' }, inner_profiles: [], workspace: 'default', outerSession: '', reviewMark: 0 };
+const DEFAULT_CONFIG = { inner: { base_url: '', api_key: '', model: '' }, embedding: { base_url: '', api_key: '', model: '' }, inner_profiles: [], workspace: 'default', outerSession: '', reviewMark: 0 };
 function getConfig() {
   try { return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) }; } catch { return { ...DEFAULT_CONFIG }; }
 }
@@ -56,6 +56,11 @@ function saveConfig(patch) {
   for (const k of ['workspace', 'outerSession', 'reviewMark']) {
     if (k in patch) next[k] = patch[k];
   }
+  // embedding 段（语义记忆 remember/recall 用）：与 inner 同模式的打码回传保留
+  if (patch.embedding && typeof patch.embedding === 'object') {
+    next.embedding = { ...(cfg.embedding || {}), ...patch.embedding };
+    if (/ˣ{4}/.test(patch.embedding.api_key || '')) next.embedding.api_key = (cfg.embedding || {}).api_key || '';
+  }
   fs.mkdirSync(DATA_DIR, { recursive: true });
   try {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
@@ -71,7 +76,9 @@ function maskedConfig() {
   const k = cfg.inner.api_key || '';
   const maskKey = key => (key ? String(key).slice(0, 3) + 'ˣˣˣˣ' : '');
   const profiles = validProfiles(cfg).map(p => ({ ...p, api_key: maskKey(p.api_key) }));
-  return { ...cfg, inner: { ...cfg.inner, api_key: maskKey(k) }, inner_profiles: profiles };
+  const embedding = { ...(cfg.embedding || {}) };
+  if (embedding.api_key) embedding.api_key = maskKey(embedding.api_key);
+  return { ...cfg, inner: { ...cfg.inner, api_key: maskKey(k) }, embedding, inner_profiles: profiles };
 }
 
 // ---------- 多工作区（内层插件默认工作目录，记忆/技能随工作区隔离） ----------

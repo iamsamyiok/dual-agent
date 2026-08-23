@@ -137,7 +137,7 @@ module.exports = {
 
 - 预装 9 个插件：
   - 工具类：read / write（覆盖走原子写、append 带重试幂等保护、智能区分续写误用与整体重构）/ edit / bash / fetch（网页抓取转文本）/ search（免 key 多引擎搜索：Serper → Bing → DuckDuckGo 降级链）
-  - 记忆类：memory（跨会话持久记忆，存工作区 `.memory-short.json` / `.memory-long.json`，单调递增 id）
+  - 记忆类：memory（五层记忆：short/long TF-IDF + 任务归档 BM25 + 语义向量 remember/recall 混合检索，见「记忆检索与整理」）
   - 技能类：skill（方法论沉淀 + **兼容 Agent Skills 开放标准**：社区技能目录直接拷入即用，详见下文）
   - 任务类：todo（跨轮任务清单，存工作区 `.todo.json`）
 - 前端「新建插件」提供三类模板（工具 / 记忆 / 技能），一键预填骨架代码
@@ -187,8 +187,18 @@ module.exports = {
 
 ## 记忆检索与整理
 
-- **TF-IDF 相关度排序**：中英混合分词（英文按词、中文 2-gram），IDF 加权，子串匹配升级为语义排序——"界面主题"同时召回"主题色""深色主题界面"且更相关者在前，无关记忆（Ubuntu 部署）不再误召回
-- **consolidate 归并**：`memory(action="consolidate")` 把同主题短期记忆簇归并为一条长期记忆（Jaccard ≥0.3 或「共同中文 2-gram + 共同英文词」强信号双通道判定），释放 MAX_SHORT 滚动容量。实测「任务weather：xxx」三条过程记忆正确聚簇、「部署服务器」独立保留
+五层记忆体系（v0.9.30 起，对齐 Hermes agent 记忆架构）：
+
+- **三层日常记忆**（`.memory-short.json` / `.memory-long.json`，每层 20 条滚动）
+  - **TF-IDF 相关度排序**：中英混合分词（英文按词、中文 2-gram），IDF 加权，子串匹配升级为语义排序——"界面主题"同时召回"主题色""深色主题界面"且更相关者在前，无关记忆（Ubuntu 部署）不再误召回
+  - **consolidate 归并**：`memory(action="consolidate")` 把同主题短期记忆簇归并为一条长期记忆（Jaccard ≥0.3 或「共同中文 2-gram + 共同英文词」强信号双通道判定），释放 MAX_SHORT 滚动容量。实测「任务weather：xxx」三条过程记忆正确聚簇、「部署服务器」独立保留
+- **任务归档层**（`workspaces/<ws>/memory-archive.jsonl`，无上限）
+  - `archive_save` 归档完整任务记录（用户消息 + 最终交付），`archive_search` BM25 全文检索（k1=1.5/b=0.75，文档长度归一）；中文 2-gram 分词，"机械密封"跨词召回历史任务
+- **语义向量层**（`.memory-vector.json`，需配置 Embedding API）
+  - `remember` 写入长期语义记忆：Embedding 生成稠密向量（L2 归一化 + Int8 量化，体积比 float JSON 小 5 倍）；高相似条目（余弦 >0.85）自动合并；存量无向量条目每次批量补嵌 10 条（渐进迁移）
+  - `recall` 混合检索：稠密余弦 + BM25 稀疏两路召回 → RRF 倒数排名融合（k=60）；支持 `tags` 前置过滤与 `mode`（hybrid/vector/keyword）；**未配置 embedding 自动降级纯关键词，功能不阻断**
+  - Embedding 配置：网页版设置面板或 hwj `/config` 向导的「Embedding API」段（OpenAI 兼容 `/embeddings`，如硅基流动 `BAAI/bge-m3`），存 `.data/config.json` 与内层 API 同文件
+  - 规模建议：Int8 量化后每条 ~4KB，1 万条内全量加载毫秒级；更大规模建议按工作区分库
 
 ## 上下文预算管理
 

@@ -39,6 +39,16 @@ function saveInnerConfig(patch) {
   try { fs.chmodSync(CONFIG_PATH, 0o600); } catch { /* 非 POSIX 忽略 */ }
   return next;
 }
+// embedding 段写回（语义记忆 recall/remember 用；与 server saveConfig 同 schema）
+function saveEmbeddingConfig(patch) {
+  const cfg = getConfig();
+  const cur = cfg.embedding || {};
+  const next = { ...cfg, embedding: { ...cur, ...patch } };
+  ensureDirs();
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2));
+  try { fs.chmodSync(CONFIG_PATH, 0o600); } catch { /* 非 POSIX 忽略 */ }
+  return next;
+}
 function hwjState() {
   try { return { mode: 'build', ws: 'default', ...JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')) }; }
   catch { return { mode: 'build', ws: 'default' }; }
@@ -441,7 +451,7 @@ async function runTask(input, ctx) {
 
 module.exports = {
   runTask, HwjAbortError, buildHwjSystemPrompt,
-  getConfig, saveInnerConfig, hwjState, saveHwjState,
+  getConfig, saveInnerConfig, saveEmbeddingConfig, hwjState, saveHwjState,
   wsDir, listWorkspaces, loadSession, persistSession, clearSession, sessionPath,
   DATA_DIR, WS_ROOT, CONFIG_PATH
 };

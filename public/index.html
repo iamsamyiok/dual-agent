@@ -316,6 +316,17 @@
         <div id="cfgProfiles"></div>
         <button class="mini-btn" style="margin-top:4px" onclick="addProfileRow()">+ 添加一路</button>
       </div>
+      <hr style="margin:12px 0;border:none;border-top:1px solid #e5e7eb">
+      <div class="frm-section">
+        <h4>Embedding API（语义记忆，可选）</h4>
+        <span class="hint">remember/recall 语义检索用（OpenAI 兼容 /embeddings，如硅基流动 + BAAI/bge-m3）；不配置则降级关键词检索</span>
+        <label>Base URL</label>
+        <input id="cfgEmbBase" placeholder="https://api.siliconflow.cn/v1">
+        <label>API Key</label>
+        <input id="cfgEmbKey" type="password" placeholder="sk-...">
+        <label>模型名</label>
+        <input id="cfgEmbModel" placeholder="BAAI/bge-m3">
+      </div>
     </div>
     <div class="m-foot">
       <button class="btn-no" onclick="closeSettings()">取消</button>
@@ -399,7 +410,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.9.28';
+const PAGE_VERSION = '0.9.30';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -1081,6 +1092,10 @@ function openConfig() {
     $('cfgBase').value = d.config.inner.base_url || '';
     $('cfgKey').value = d.config.inner.api_key || '';
     $('cfgModel').value = d.config.inner.model || '';
+    const e = d.config.embedding || {};
+    $('cfgEmbBase').value = e.base_url || '';
+    $('cfgEmbKey').value = e.api_key || '';
+    $('cfgEmbModel').value = e.model || '';
     $('cfgProfiles').innerHTML = '';
     (d.config.inner_profiles || []).forEach(p => addProfileRow(p));
     $('configMask').classList.add('show');
@@ -1093,7 +1108,8 @@ async function saveConfigUi() {
     r.querySelectorAll('input[data-k]').forEach(i => { o[i.dataset.k] = i.value.trim(); });
     return o;
   }).filter(o => o.base_url && o.model); // 名称/key 可省（key 缺失则此路无效，后端同样校验）
-  const d = await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inner: { base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() }, inner_profiles: profiles }) });
+  const emb = { base_url: $('cfgEmbBase').value.trim(), api_key: $('cfgEmbKey').value.trim(), model: $('cfgEmbModel').value.trim() };
+  const d = await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inner: { base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() }, embedding: emb, inner_profiles: profiles }) });
   if (d.success) { closeConfig(); toast('配置已保存'); loadHealth(); }
 }
 
@@ -1238,18 +1254,18 @@ function initCollapsible() {
 function openSettings() {
   $('settingsMask').classList.add('show');
   // 加载配置
-  api('/api/health').then(h => {
-    if (h.innerConfigured) {
-      api('/api/config').then(c => {
-        if (c.inner) {
-          $('cfgBase').value = c.inner.base_url || '';
-          $('cfgKey').value = c.inner.api_key || '';
-          $('cfgModel').value = c.inner.model || '';
-          $('cfgProfiles').innerHTML = '';
-          (c.inner_profiles || []).forEach(p => addProfileRow(p));
-        }
-      }).catch(() => {});
+  api('/api/config').then(c => {
+    if (c.inner) {
+      $('cfgBase').value = c.inner.base_url || '';
+      $('cfgKey').value = c.inner.api_key || '';
+      $('cfgModel').value = c.inner.model || '';
+      $('cfgProfiles').innerHTML = '';
+      (c.inner_profiles || []).forEach(p => addProfileRow(p));
     }
+    const e = c.embedding || {};
+    $('cfgEmbBase').value = e.base_url || '';
+    $('cfgEmbKey').value = e.api_key || '';
+    $('cfgEmbModel').value = e.model || '';
   }).catch(() => {});
 }
 
@@ -1265,6 +1281,7 @@ function saveSettings() {
   }).filter(o => o.base_url && o.model);
   api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
     inner: { base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() },
+    embedding: { base_url: $('cfgEmbBase').value.trim(), api_key: $('cfgEmbKey').value.trim(), model: $('cfgEmbModel').value.trim() },
     inner_profiles: profiles
   }) }).then(d => {
     if (d.success) { closeSettings(); toast('设置已保存'); loadHealth(); }

@@ -14,7 +14,7 @@ const HELP = [
   '/history           会话条数摘要与最近消息预览',
   '/usage             token 用量统计（本会话累计 + 历史分组）',
   '/tools [序号]      最近插件调用折叠列表（带序号展开参数与结果详情）',
-  '/memory [关键词]   检索工作区记忆',
+  '/memory [关键词]   跨层检索工作区记忆（三层/语义/任务归档）',
   '/todo              查看任务清单',
   '/export [文件名]   导出当前会话为 Markdown（默认 hwj-export-<时间>.md）',
   '/clear             清屏（保留会话）',
@@ -59,6 +59,20 @@ async function runCommand(line, ctx) {
         core.saveInnerConfig({ base_url, api_key, model });
         ui.printInfo('配置已保存（与网页版共享 .data/config.json）');
       } catch (e) { ui.printError('保存失败：' + (e && e.message || e)); }
+      // embedding（语义记忆 remember/recall 用；三项全空可跳过，跳过时记忆检索降级关键词模式）
+      const ec = cfg.embedding || {};
+      ui.printPlain('Embedding API（语义记忆用，OpenAI 兼容 /embeddings，如硅基流动 https://api.siliconflow.cn/v1 + BAAI/bge-m3）');
+      const e_url = await ask('Embedding Base URL（回车跳过）', ec.base_url || '');
+      if (e_url) {
+        const e_key = await ask('Embedding API Key', ec.api_key || '');
+        const e_model = await ask('Embedding 模型名（如 BAAI/bge-m3）', ec.model || '');
+        try {
+          core.saveEmbeddingConfig({ base_url: e_url, api_key: e_key, model: e_model });
+          ui.printInfo(`Embedding 已配置（${e_model}），remember/recall 语义检索已启用`);
+        } catch (e) { ui.printError('Embedding 保存失败：' + (e && e.message || e)); }
+      } else {
+        ui.printInfo(ec.model ? 'Embedding 保持已有配置' : '未配置 Embedding（remember/recall 降级为关键词检索）');
+      }
       return 'handled';
     }
 
@@ -161,10 +175,27 @@ async function runCommand(line, ctx) {
     }
 
     case '/memory': {
-      try {
-        const out = await plugins.runPlugin('memory', { action: 'search', query: arg || '' }, { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR });
-        ui.printPlain(String(out));
-      } catch (e) { ui.printError('记忆检索失败：' + (e && e.message || e)); }
+      // 跨层检索：short/long（TF-IDF）+ 语义记忆（recall 混合）+ 任务归档（BM25），三路结果合并展示
+      const mctx = { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR };
+      const sections = [];
+      const grab = (label, args2) => plugins.runPlugin('memory', args2, mctx)
+        .then(out => { const s = String(out); if (!/为空|没有匹配|不存在/.test(s.slice(0, 30))) sections.push(`【${label}】\n${s}`); })
+        .catch(() => {});
+      if (!arg) {
+        try {
+          const out = await plugins.runPlugin('memory', { action: 'list' }, mctx);
+          ui.printPlain(String(out));
+          const vec = await plugins.runPlugin('memory', { action: 'recall', query: '最近经验', top_k: 3 }, mctx).catch(() => '');
+          ui.printPlain(`【语义记忆】${String(vec).split('\n').slice(0, 4).join('\n')}`);
+        } catch (e) { ui.printError('记忆读取失败：' + (e && e.message || e)); }
+        return 'handled';
+      }
+      await Promise.all([
+        grab('三层记忆', { action: 'search', query: arg }),
+        grab('语义记忆', { action: 'recall', query: arg, top_k: 3 }),
+        grab('任务归档', { action: 'archive_search', query: arg })
+      ]);
+      ui.printPlain(sections.length ? `跨层检索「${arg}」：\n\n${sections.join('\n\n')}` : `所有记忆层都没有匹配「${arg}」的内容`);
       return 'handled';
     }
 
