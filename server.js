@@ -1289,6 +1289,18 @@ const server = http.createServer(async (req, res) => {
       json(res, 200, { success: true, current: id, messages: innerMessages.filter(m => m.role !== 'system').slice(-60) });
       return;
     }
+    if (p === '/api/sessions/get' && req.method === 'GET') {
+      const url = new URL(req.url, 'http://localhost');
+      const sid = url.searchParams.get('i') || '';
+      if (!sid) { json(res, 400, { success: false, error: '缺少会话ID' }); return; }
+      try {
+        const msgs = JSON.parse(fs.readFileSync(sessionFilePath(sid), 'utf8')) || [];
+        json(res, 200, { success: true, messages: msgs.filter(m => m.role !== 'system') });
+      } catch {
+        json(res, 404, { success: false, error: '会话不存在' });
+      }
+      return;
+    }
     if (p === '/api/sessions/delete' && req.method === 'POST') {
       if (innerLock) { json(res, 409, { success: false, error: '内层执行中，不能删除会话' }); return; }
       const body = await readBody(req);
