@@ -174,6 +174,12 @@
   .setting-row:last-of-type { border-bottom: none; }
   .toggle-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: var(--text); }
   .hint { font-size: 12px; color: var(--text-ter); line-height: 1.5; }
+  /* API Key 输入框：默认明文可见 + 眼睛切换（用户要求：配置时能看到自己输入的 key） */
+  .key-wrap { position: relative; }
+  .key-wrap input { width: 100%; box-sizing: border-box; padding-right: 42px !important; }
+  .key-eye { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; color: var(--text-ter); padding: 6px; display: flex; align-items: center; border-radius: 6px; }
+  .key-eye:hover { color: var(--text); }
+  .key-eye svg { width: 17px; height: 17px; }
   .profile-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
   .profile-row input { flex: 1; min-width: 120px; }
   #toast { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); background: #0f172a; color: #fff; border-radius: 10px; padding: 9px 20px; font-size: 13px; display: none; z-index: 99; box-shadow: var(--shadow-lg); }
@@ -362,7 +368,7 @@
              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:18px;height:18px"><path d="M21.44 11.05l-9-19a2 2 0 0 0-3.23 0l-9 19a2 2 0 0 0 .64 2.78l9 9a2 2 0 0 0 2.83 0l9-9a2 2 0 0 0 .64-2.78z"/><path d="M12 5v14"/></svg>
            </button>
            <input type="file" id="fileInput" style="display:none" multiple>
-           <textarea id="innerInput" rows="2" placeholder="给 HWJ agent 下任务（执行中输入锁定）" autocomplete="off"></textarea>
+            <textarea id="innerInput" rows="2" placeholder="输入任务" autocomplete="off"></textarea>
            <button id="innerSendBtn" onclick="innerSend()" style="flex:none">
              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:20px;height:20px"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
            </button>
@@ -438,7 +444,12 @@
         <label>Base URL（如 https://api.siliconflow.cn/v1）</label>
         <input id="cfgBase" placeholder="https://.../v1">
         <label>API Key（仅保存在本机 .data/config.json）</label>
-        <input id="cfgKey" type="password" placeholder="sk-...">
+        <div class="key-wrap">
+          <input id="cfgKey" type="text" placeholder="sk-..." autocomplete="off">
+          <button type="button" class="key-eye" onclick="toggleKeyEye(this)" title="显示/隐藏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
         <label>模型名（如 Qwen/Qwen3-8B）</label>
         <input id="cfgModel" placeholder="provider/model">
         <button class="mini-btn" style="margin-top:6px" onclick="testInnerLlm(this)">测试连接</button>
@@ -455,7 +466,12 @@
         <label>Base URL</label>
         <input id="cfgEmbBase" placeholder="https://api.siliconflow.cn/v1">
         <label>API Key</label>
-        <input id="cfgEmbKey" type="password" placeholder="sk-...">
+        <div class="key-wrap">
+          <input id="cfgEmbKey" type="text" placeholder="sk-..." autocomplete="off">
+          <button type="button" class="key-eye" onclick="toggleKeyEye(this)" title="显示/隐藏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
+        </div>
         <label>模型名</label>
         <input id="cfgEmbModel" placeholder="BAAI/bge-m3">
         <button class="mini-btn" style="margin-top:6px" onclick="testEmbedding(this)">测试连接</button>
@@ -569,7 +585,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '1.3.8';
+const PAGE_VERSION = '1.3.9';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -1031,7 +1047,7 @@ async function innerSend() {
         scrollBottom('innerMsgs');
       }
       else if (ev.type === 'error') { appendMsg('innerMsgs', 'error', ev.content, ''); cur = null; }
-    }, abortCtrl.signal);
+    }, innerAbortCtrl.signal);
   } catch (e) {
     if (e.name === 'AbortError') {
       appendMsg('innerMsgs', 'system', '已停止生成', '');
@@ -1335,44 +1351,31 @@ async function doRollback() {
 }
 
 // ==================== 配置 ====================
+// API Key 眼睛切换：默认明文（配置时能看到输入内容），点击隐藏
+function toggleKeyEye(btn) {
+  const inp = btn.parentElement.querySelector('input');
+  const showing = inp.type === 'text';
+  inp.type = showing ? 'password' : 'text';
+  btn.title = showing ? '显示' : '隐藏';
+  btn.style.opacity = showing ? '.5' : '1';
+}
+const EYE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+function keyInputHtml(id, ph, val) {
+  return `<div class="key-wrap"><input ${id ? `id="${id}" ` : ''}data-k="api_key" type="text" placeholder="${esc(ph)}" value="${esc(val || '')}" autocomplete="off"><button type="button" class="key-eye" onclick="toggleKeyEye(this)" title="隐藏">${EYE_SVG}</button></div>`;
+}
 function profileRow(p = { name: '', base_url: '', api_key: '', model: '' }) {
   const div = document.createElement('div');
   div.className = 'profile-row';
-  div.style.cssText = 'display:grid;grid-template-columns:70px 1fr 1fr 1fr 26px;gap:4px;margin:4px 0';
+  div.style.cssText = 'display:grid;grid-template-columns:70px 1fr 1fr 1fr 26px 26px;gap:4px;margin:4px 0';
    div.innerHTML = `<input placeholder="名称" value="${esc(p.name)}" data-k="name">
      <input placeholder="base_url" value="${esc(p.base_url)}" data-k="base_url">
-     <input placeholder="api_key" type="password" value="${esc(p.api_key)}" data-k="api_key">
+     ${keyInputHtml('', p.api_key ? '已保存，留空不变' : 'api_key（可后填）', '')}
      <input placeholder="model" value="${esc(p.model)}" data-k="model">
      <button class="mini-btn" onclick="testProfileLlm(this)" title="用此路配置发一次最小请求验证连通">测</button>
      <button class="mini-btn" onclick="this.parentElement.remove()" title="删除此路">×</button>`;
    return div;
- }
+  }
 function addProfileRow(p) { $('cfgProfiles').appendChild(profileRow(p)); }
-function openConfig() {
-  api('/api/config').then(d => {
-    $('cfgBase').value = d.config.inner.base_url || '';
-    $('cfgKey').value = d.config.inner.api_key || '';
-    $('cfgModel').value = d.config.inner.model || '';
-    const e = d.config.embedding || {};
-    $('cfgEmbBase').value = e.base_url || '';
-    $('cfgEmbKey').value = e.api_key || '';
-    $('cfgEmbModel').value = e.model || '';
-    $('cfgProfiles').innerHTML = '';
-    (d.config.inner_profiles || []).forEach(p => addProfileRow(p));
-    $('configMask').classList.add('show');
-  });
-}
-function closeConfig() { $('configMask').classList.remove('show'); }
-async function saveConfigUi() {
-  const profiles = [...$('cfgProfiles').querySelectorAll('.profile-row')].map(r => {
-    const o = {};
-    r.querySelectorAll('input[data-k]').forEach(i => { o[i.dataset.k] = i.value.trim(); });
-    return o;
-  }).filter(o => o.base_url && o.model); // 名称/key 可省（key 缺失则此路无效，后端同样校验）
-  const emb = { base_url: $('cfgEmbBase').value.trim(), api_key: $('cfgEmbKey').value.trim(), model: $('cfgEmbModel').value.trim() };
-  const d = await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ inner: { base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() }, embedding: emb, inner_profiles: profiles }) });
-  if (d.success) { closeConfig(); toast('配置已保存'); loadHealth(); }
-}
 
 // ==================== 审计 ====================
 async function loadAudit() {
@@ -1504,20 +1507,23 @@ function initCollapsible() {
 // ==================== 设置面板控制 ====================
 function openSettings() {
   $('settingsMask').classList.add('show');
-  // 加载配置
+  // 加载配置（v1.3.9：GET 失败绝不展示空表单——曾致用户在空表单上保存，真实配置被空串覆盖）
   api('/api/config').then(c => {
-    if (c.inner) {
-      $('cfgBase').value = c.inner.base_url || '';
-      $('cfgKey').value = c.inner.api_key || '';
-      $('cfgModel').value = c.inner.model || '';
-      $('cfgProfiles').innerHTML = '';
-      (c.inner_profiles || []).forEach(p => addProfileRow(p));
-    }
-    const e = c.embedding || {};
+    if (!c.success) { closeSettings(); toast('配置加载失败，请重试（未保存任何改动）'); return; }
+    const inner = c.config.inner || {};
+    $('cfgBase').value = inner.base_url || '';
+    $('cfgModel').value = inner.model || '';
+    // key 留空 + placeholder 提示：配合服务端「空 key 不覆盖」，彻底消灭打码值回传链路
+    $('cfgKey').value = '';
+    $('cfgKey').placeholder = inner.api_key ? `已保存（${inner.api_key}），留空保持不变` : 'sk-...';
+    $('cfgProfiles').innerHTML = '';
+    (c.config.inner_profiles || []).forEach(p => addProfileRow(p));
+    const e = c.config.embedding || {};
     $('cfgEmbBase').value = e.base_url || '';
-    $('cfgEmbKey').value = e.api_key || '';
     $('cfgEmbModel').value = e.model || '';
-  }).catch(() => {});
+    $('cfgEmbKey').value = '';
+    $('cfgEmbKey').placeholder = e.api_key ? `已保存（${e.api_key}），留空保持不变` : 'sk-...';
+  }).catch(() => { closeSettings(); toast('配置加载失败，请重试（未保存任何改动）'); });
 }
 
 function closeSettings() {

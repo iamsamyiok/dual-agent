@@ -54,30 +54,44 @@ function getConfig() {
 function saveConfig(patch) {
   const cfg = getConfig();
   const next = { ...cfg, inner: { ...cfg.inner, ...(patch.inner || {}) } };
+  // WSL-KeepKey：空 api_key 不覆盖已存 key（"留空=保持不变"；GET 失败弹空表单再保存也不丢配置）
+  if (patch.inner && !String(patch.inner.api_key || '').trim() && cfg.inner.api_key) {
+    next.inner.api_key = cfg.inner.api_key;
+  }
   // 前端回传打码值时保留原 key
   if (patch.inner && /ˣ{4}/.test(patch.inner.api_key || '')) next.inner.api_key = cfg.inner.api_key;
-  // 多路 API profile：数组整体替换；条目内打码值保留原 key（前端未改动即回传打码串）
+  // 多路 API profile：数组整体替换；key 恢复按 base_url+model 内容匹配（v1.3.9：按索引对齐在前端
+  // filter 移位后会恢复到错误的 key——删一路再保存，剩余行全部串位）
   if (Array.isArray(patch.inner_profiles)) {
     const prev = validProfiles(cfg);
-    next.inner_profiles = patch.inner_profiles.map((p, i) => {
+    next.inner_profiles = patch.inner_profiles.map(p => {
       if (!p || typeof p !== 'object') return p;
-      const old = prev[i];
-      return /ˣ{4}/.test(String(p.api_key || '')) && old ? { ...p, api_key: old.api_key } : p;
+      const masked = /ˣ{4}/.test(String(p.api_key || ''));
+      const empty = !String(p.api_key || '').trim();
+      if (masked || empty) {
+        const old = prev.find(q => q.base_url === p.base_url && q.model === p.model && q.api_key);
+        if (old) return { ...p, api_key: old.api_key };
+      }
+      return p;
     });
   }
   for (const k of ['workspace', 'outerSession', 'reviewMark']) {
     if (k in patch) next[k] = patch[k];
   }
-  // embedding 段（语义记忆 remember/recall 用）：与 inner 同模式的打码回传保留
+  // embedding 段（语义记忆 remember/recall 用）：与 inner 同模式——空 key 与打码回传均保留原值
   if (patch.embedding && typeof patch.embedding === 'object') {
     next.embedding = { ...(cfg.embedding || {}), ...patch.embedding };
+    if (!String(patch.embedding.api_key || '').trim() && (cfg.embedding || {}).api_key) next.embedding.api_key = cfg.embedding.api_key;
     if (/ˣ{4}/.test(patch.embedding.api_key || '')) next.embedding.api_key = (cfg.embedding || {}).api_key || '';
   }
   fs.mkdirSync(DATA_DIR, { recursive: true });
   try {
     // WSL-SteadyKey 原子写三步：旧配置备份 .bak → tmp 写入 + fsync → rename 原子替换
     // （旧实现直接 writeFileSync 主文件：进程在写入瞬间被系统杀掉 → 半写损坏 → 配置丢失）
-    try { fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak'); } catch { /* 首次保存无旧文件 */ }
+    // v1.3.9 加固：只有主文件完好时才备份——半写损坏的 main 绝不能覆盖唯一的好 .bak
+    if (readConfigFile(CONFIG_PATH) !== null) {
+      try { fs.copyFileSync(CONFIG_PATH, CONFIG_PATH + '.bak'); } catch { /* 备份失败不阻断保存 */ }
+    }
     const tmp = CONFIG_PATH + '.tmp';
     const fd = fs.openSync(tmp, 'w');
     try {
@@ -1100,12 +1114,17 @@ const server = http.createServer(async (req, res) => {
        return;
      }
      // 内层 LLM 连通性测试：body 指定 base_url/api_key/model（缺省回落已存配置），发 max_tokens=4 最小请求
-     if (p === '/api/llm/test' && req.method === 'POST') {
-       const body = await readBody(req);
-       const cfg = getConfig();
-       const base = String(body.base_url || (cfg.inner && cfg.inner.base_url) || '').trim();
-       const key = String(body.api_key || (cfg.inner && cfg.inner.api_key) || '').trim();
-       const model = String(body.model || (cfg.inner && cfg.inner.model) || '').trim();
+      if (p === '/api/llm/test' && req.method === 'POST') {
+      const body = await readBody(req);
+      const cfg = getConfig();
+      const base = String(body.base_url || (cfg.inner && cfg.inner.base_url) || '').trim();
+      let key = String(body.api_key || '').trim(); // 空串不回落主配置——先按 base_url+model 匹配 profile（v1.3.9：key 留空不变语义下的单路测试）
+      if (!key && base) {
+        const prof = validProfiles(cfg).find(q => q.base_url === base && (!body.model || q.model === body.model) && q.api_key);
+        if (prof) key = prof.api_key;
+      }
+      if (!key) key = String((cfg.inner && cfg.inner.api_key) || '').trim();
+      const model = String(body.model || (cfg.inner && cfg.inner.model) || '').trim();
        if (!base || !key || !model) { json(res, 200, { ok: false, result: '请先填写 Base URL / API Key / 模型名' }); return; }
        const t0 = Date.now();
        try {

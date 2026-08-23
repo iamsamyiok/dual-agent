@@ -1422,6 +1422,15 @@ async function main() {
     assert.ok(/失败-限流\/网络/.test(out) && /稍后重试|缩小并发|主会话直接执行/.test(out), '给出可操作建议：' + out.slice(0, 150));
   });
 
+  await t('静态防回归：前端 abortCtrl 笔误（v1.3.8 真机事故：innerSend 引用未定义变量，语法检查抓不到运行时 ReferenceError）', () => {
+    const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n');
+    const bare = [...scripts.matchAll(/(?<![A-Za-z0-9_.])abortCtrl(?![A-Za-z0-9_])/g)];
+    assert.ok(bare.length === 0, `内联 script 存在 ${bare.length} 处裸 abortCtrl 引用（应为 innerAbortCtrl）`);
+    const defs = (scripts.match(/innerAbortCtrl = new AbortController\(\)/g) || []).length;
+    assert.ok(defs >= 1, 'innerAbortCtrl 创建语句存在');
+  });
+
   await t('spawnSub 参数链静态防回归（v0.9.7 压测教训：拆函数断参 ReferenceError）', () => {
     const src = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
     const defs = [...src.matchAll(/runSubOnce = async \(picked([^)]*)\)/g)];
@@ -1773,6 +1782,35 @@ async function main() {
   await t('health：mock + 版本 + 工作区 default', async () => {
     const r = await (await fetch(base + '/api/health')).json();
     assert.ok(r.success && r.mock === true && r.workspace === 'default');
+  });
+  // ===== 配置防丢失回归（v1.3.9：真机"隔一阵子要重新配置"四病根） =====
+  const postCfg = async (body) => (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+  await t('配置保存：空 api_key 不覆盖已存 key（GET 失败弹空表单再保存的场景）', async () => {
+    let r = await postCfg({
+      inner: { base_url: 'https://a/v1', api_key: 'sk-real-key-111', model: 'm1' },
+      embedding: { base_url: 'https://e/v1', api_key: 'sk-emb-222', model: 'bge' },
+      inner_profiles: [
+        { name: 'A', base_url: 'https://a/v1', api_key: 'ka111', model: 'ma' },
+        { name: 'B', base_url: 'https://b/v1', api_key: 'kb222', model: 'mb' }
+      ]
+    });
+    assert.ok(r.success, '首次保存成功');
+    r = await postCfg({ inner: { base_url: 'https://a/v1', api_key: '', model: 'm1' }, embedding: { base_url: 'https://e/v1', api_key: '', model: 'bge' } });
+    assert.ok(r.success);
+    assert.equal(r.config.inner.api_key, 'sk-ˣˣˣˣ', 'inner 空 key 必须保留原值');
+    assert.equal(r.config.embedding.api_key, 'sk-ˣˣˣˣ', 'embedding 空 key 必须保留原值');
+  });
+  await t('配置保存：profile 删行后 key 按内容匹配恢复（索引串位防护）', async () => {
+    const r = await postCfg({ inner_profiles: [{ name: 'B', base_url: 'https://b/v1', api_key: '', model: 'mb' }] });
+    assert.ok(r.success && r.config.inner_profiles.length === 1, '剩余一路');
+    assert.equal(r.config.inner_profiles[0].api_key, 'kb2ˣˣˣˣ', '按 base_url+model 匹配恢复 B 路原 key（非索引对齐）');
+  });
+  await t('配置恢复：main 半写损坏时从完好的 .bak 自愈（.bak 不被坏文件污染）', async () => {
+    fs.writeFileSync(path.join(DATA_TMP, 'config.json'), '{"inner": {"api_key": "sk-real'); // 模拟写入瞬间被杀的半写文件
+    const h = await (await fetch(base + '/api/health')).json();
+    assert.ok(h.innerConfigured === true, '坏 main 触发 .bak 回滚，配置仍可用');
+    const c = await (await fetch(base + '/api/config')).json();
+    assert.equal(c.config.inner.api_key, 'sk-ˣˣˣˣ', '恢复的是完好配置');
   });
   await t('内层对话：bash→write 工具循环 + done', async () => {
     const evs = await sseEvents('/api/inner/chat', { message: '演示' });
