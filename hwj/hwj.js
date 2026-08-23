@@ -15,7 +15,7 @@ const WS_ARG = argOf('--ws');
 const INTERACTIVE = !SCRIPT_MSG && process.stdin.isTTY && process.stdout.isTTY;
 
 const BANNER = [
-  `hwj 终端智能体 v${PKG.version} — 双层 Agent 自迭代系统（内层引擎 + 21 插件）`,
+  `hwj-agent v${PKG.version} — 双层 Agent 自迭代系统（内层引擎 + 21 插件）`,
   '输入任务直接执行；/help 查看命令；Ctrl+C 中断任务（空闲时双击退出）'
 ];
 
@@ -144,11 +144,44 @@ async function main() {
   });
 
   ui.start();
-  // 未配置时自动进入向导（配置完直接可用）
+  // 未配置时引导配置（v1.1.1：网页配置优先——表单体验远好于终端逐项问答；终端向导降为备选）
   if (unconfigured) {
-    await commands.runCommand('/config', { ui, ws, onModeChange: () => {}, onWorkspaceChange: () => {}, onReset: () => {} });
-    ui.printInfo('配置完成，现在输入任务开始（/help 查看命令）');
-    ui.refreshPrompt();
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+    const ask = q => new Promise(res => rl.question(q, a => res(String(a || '').trim().toLowerCase())));
+    let ans = '';
+    try { ans = await ask('内层 API 未配置。回车打开网页配置（推荐，浏览器填表单）；t=终端向导；n=跳过：'); }
+    catch { /* 输入异常按跳过处理 */ }
+    finally { rl.close(); }
+    if (ans === 't') {
+      await commands.runCommand('/config', { ui, ws, onModeChange: () => {}, onWorkspaceChange: () => {}, onReset: () => {} });
+      ui.printInfo('配置完成，现在输入任务开始（/help 查看命令）');
+    } else if (ans === 'n') {
+      ui.printInfo('已跳过。随时 /config 终端向导，或退出后运行 hwj-agent gui 打开网页配置');
+    } else {
+      // 后台起 Web 服务 + 开浏览器（detached：TUI 退出不影响配置页；网页全关 60 秒后服务自动退出）
+      const net = require('net');
+      const tryPort = p => new Promise(res => { const s = net.createServer(); s.once('error', () => res(false)); s.once('listening', () => s.close(() => res(true))); s.listen(p, '127.0.0.1'); });
+      let port = 0;
+      for (let p = Number(process.env.DUAL_AGENT_PORT) || 3788; p < (Number(process.env.DUAL_AGENT_PORT) || 3788) + 9; p++) {
+        if (await tryPort(p)) { port = p; break; }
+      }
+      if (port) {
+        const { spawn } = require('child_process');
+        const env = { ...process.env, NO_PROXY: 'localhost,127.0.0.1', HTTP_PROXY: '', HTTPS_PROXY: '', http_proxy: '', https_proxy: '' };
+        spawn(process.execPath, [require('path').join(__dirname, '..', 'server.js'), '--port', String(port)], { detached: true, stdio: 'ignore', env }).unref();
+        const url = `http://localhost:${port}/`;
+        try {
+          const [cmd, cargs] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
+            : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
+          spawn(cmd, cargs, { detached: true, stdio: 'ignore' }).unref();
+        } catch { /* 打不开时用户可手动访问 */ }
+        ui.printInfo(`配置页已打开：${url}（右上角「设置」填 Base URL / API Key / 模型名，保存即生效）`);
+        ui.printInfo('完成后回到本终端直接输入任务即可（无需重启）。打不开浏览器就手动访问上面的地址');
+      } else {
+        ui.printInfo('端口 3788-3796 被占用，无法打开配置页。运行 /config 用终端向导配置');
+      }
+      ui.refreshPrompt();
+    }
   }
 }
 

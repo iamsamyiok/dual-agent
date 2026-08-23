@@ -17,21 +17,21 @@ const PROBE_JS = path.join(ROOT, 'tools', 'probe.js');
 process.on('SIGINT', () => {});
 
 const HELP = [
-  `hwj ${PKG.version} — 双层 Agent 自迭代系统（统一入口）`,
+  `hwj-agent ${PKG.version} — 双层 Agent 自迭代系统（统一入口）`,
   '',
-  '用法：hwj [命令] [参数]',
+  '用法：hwj-agent [命令] [参数]',
   '',
-  '  hwj                  启动终端交互界面（等同 hwj tui）',
-  '  hwj tui [--ws 名称]  终端交互界面（--ws 指定工作区）',
-  '  hwj gui              启动 Web 界面（自动挑端口 3788-3796；已在跑则直接开浏览器）',
-  '  hwj run [选项] 提示词 非交互执行单次任务，输出过程与结果（退出码 0/1）',
-  '    --ws 名称           指定工作区（默认 default，与 tui/网页版共享会话）',
-  '    -q, --quiet         只输出最终结果（适合脚本/管道调用）',
-  '    提示词为 -          从 stdin 读取（echo 任务 | hwj run -）',
-  '  hwj install           安装到 PATH（Windows: WindowsApps；macOS/Linux: ~/.local/bin）',
-  '  hwj uninstall         从 PATH 移除',
-  '  hwj version           显示版本',
-  '  hwj help              显示本帮助',
+  '  hwj-agent              启动终端交互界面（等同 hwj-agent tui）',
+  '  hwj-agent tui [--ws 名称] 终端交互界面（--ws 指定工作区）',
+  '  hwj-agent gui          启动 Web 界面（自动挑端口 3788-3796；已在跑则直接开浏览器）',
+  '  hwj-agent run [选项] 提示词 非交互执行单次任务，输出过程与结果（退出码 0/1）',
+  '    --ws 名称            指定工作区（默认 default，与 tui/网页版共享会话）',
+  '    -q, --quiet          只输出最终结果（适合脚本/管道调用）',
+  '    提示词为 -           从 stdin 读取（echo 任务 | hwj-agent run -）',
+  '  hwj-agent install      安装 hwj 短命令到 PATH（Windows: WindowsApps；macOS/Linux: ~/.local/bin）',
+  '  hwj-agent uninstall    从 PATH 移除 hwj 短命令',
+  '  hwj-agent version      显示版本',
+  '  hwj-agent help         显示本帮助',
   '',
   '环境变量：DUAL_AGENT_MOCK=1 演示模式；DUAL_AGENT_PORT=gui 起始端口；',
   'DUAL_AGENT_DATA / DUAL_AGENT_WS_ROOT 数据与工作区根（测试隔离用）',
@@ -191,6 +191,6 @@ switch (sub) {
   case '_temphint': cmdTempHint(); break;
   case '_tempnote': cmdTempNote(); break;
   case 'help': case '--help': case '-h': process.stdout.write(HELP + '\n'); break;
-  case 'version': case '--version': case '-v': process.stdout.write(`hwj ${PKG.version}\n`); break;
+  case 'version': case '--version': case '-v': process.stdout.write(`hwj-agent ${PKG.version}\n`); break;
   default: die(`未知命令：${sub}（hwj help 查看用法）`, 2);
 }

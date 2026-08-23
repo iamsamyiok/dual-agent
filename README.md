@@ -10,15 +10,18 @@
 ```bash
 # 全局安装（推荐）
 npm i -g hwj-agent
-hwj                      # 终端智能体 TUI（Windows/macOS/Linux 通用）
-hwj run "创建 hello.txt 写入问候语"   # 非交互单次任务
-hwj gui                  # Web 界面（自动挑端口）
+hwj-agent                # 终端智能体 TUI（Windows/macOS/Linux 通用）
+hwj-agent run "创建 hello.txt 写入问候语"   # 非交互单次任务
+hwj-agent gui            # Web 界面（自动挑端口）
+hwj-agent install        # 可选：把 hwj 短命令装入 PATH（喜欢短命令的用户）
 
 # 免安装试跑
 npx hwj-agent run "演示任务"
 ```
 
-无 npm 环境：Windows 双击 `hwj.bat` / `install.bat`，macOS/Linux 双击 `hwj.command`。首次使用输入 `/config` 配置 API（或 `hwj gui` 网页配置）。
+**首次使用**：运行 `hwj-agent` 检测到未配置时，回车即自动打开浏览器配置页（表单填 Base URL / API Key / 模型名，保存即生效，回到终端直接输入任务无需重启）；也可 `t` 用终端向导、`n` 跳过。
+
+无 npm 环境：Windows 双击 `hwj.bat` / `install.bat`，macOS/Linux 双击 `hwj.command`。
 
 ### SDK（两行代码调用）
 
