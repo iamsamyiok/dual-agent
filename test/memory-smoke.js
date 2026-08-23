@@ -40,6 +40,7 @@ function vecFor(text) {
 }
 let embCalls = 0;
 let lastAuth = '';
+let lastInputs = []; // 每次请求的 input 数组快照（截断断言用）
 const embServer = http.createServer((req, res) => {
   let body = '';
   req.on('data', c => body += c);
@@ -48,7 +49,8 @@ const embServer = http.createServer((req, res) => {
     lastAuth = req.headers.authorization || '';
     let input = [];
     try { input = JSON.parse(body).input; } catch { /* 坏 body */ }
-    const list = (Array.isArray(input) ? input : [input]).map(x => ({ embedding: vecFor(String(x)) }));
+    lastInputs = (Array.isArray(input) ? input : [input]).map(String);
+    const list = lastInputs.map(x => ({ embedding: vecFor(x) }));
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ data: list }));
   });
@@ -130,6 +132,27 @@ function clearEmbConfig() {
   await new Promise(r => embServer.listen(0, '127.0.0.1', r));
   const PORT = embServer.address().port;
   writeEmbConfig(PORT);
+  await t('emb_test：配置就绪时返回维度与耗时', async () => {
+    const r = await run({ action: 'emb_test' });
+    assert.ok(/连接成功.*mock-bge.*64 维/.test(r), r);
+  });
+  await t('emb_test：未配置时返回申请指引', async () => {
+    // 临时清配置验证指引文案（随后恢复）
+    const bak = fs.readFileSync(path.join(DATA, 'config.json'), 'utf8');
+    clearEmbConfig();
+    const r = await run({ action: 'emb_test' });
+    assert.ok(/未配置 embedding/.test(r) && /siliconflow/.test(r), r);
+    fs.writeFileSync(path.join(DATA, 'config.json'), bak);
+  });
+  await t('embedTexts 批量每条截 480 字符（硅基流动批量 512 token 限制保护）', async () => {
+    const long = '超滤'.repeat(300); // 600 字符 > 480
+    await run({ action: 'remember', content: long, tags: ['截断'] });
+    const inputs = lastInputs;
+    assert.ok(inputs.length >= 1 && inputs.every(s => s.length <= 480), `每条应 ≤480 字符，实际 ${inputs.map(s => s.length).join(',')}`);
+    const data = JSON.parse(fs.readFileSync(path.join(WS, '.memory-vector.json'), 'utf8'));
+    const it = data.items.find(x => (x.tags || []).includes('截断'));
+    assert.ok(it && Array.isArray(it.dense), '截断条目仍应正常写入向量');
+  });
   await t('remember 带 embedding 写入稠密向量（校验 auth 头）', async () => {
     const r = await run({ action: 'remember', content: '消毒剂投加：按余氯反馈 PID 调节', tags: ['消毒'] });
     assert.ok(/#3/.test(r) && /语义\+关键词/.test(r), r);

@@ -318,14 +318,17 @@
       </div>
       <hr style="margin:12px 0;border:none;border-top:1px solid #e5e7eb">
       <div class="frm-section">
-        <h4>Embedding API（语义记忆，可选）</h4>
-        <span class="hint">remember/recall 语义检索用（OpenAI 兼容 /embeddings，如硅基流动 + BAAI/bge-m3）；不配置则降级关键词检索</span>
+        <h4>Embedding API（语义记忆，推荐硅基流动免费 bge-m3）</h4>
+        <span class="hint">remember/recall 语义检索用（OpenAI 兼容 /embeddings）；不配置则降级关键词检索。<br>
+        免费申请：打开 <a href="https://cloud.siliconflow.cn/account/ak" target="_blank" rel="noopener">cloud.siliconflow.cn/account/ak</a> 注册/登录硅基流动 → 新建 API 密钥 → 复制 sk- 开头密钥填入下方。模型 BAAI/bge-m3 免费（1024 维）。</span>
         <label>Base URL</label>
         <input id="cfgEmbBase" placeholder="https://api.siliconflow.cn/v1">
         <label>API Key</label>
         <input id="cfgEmbKey" type="password" placeholder="sk-...">
         <label>模型名</label>
         <input id="cfgEmbModel" placeholder="BAAI/bge-m3">
+        <button class="mini-btn" style="margin-top:6px" onclick="testEmbedding(this)">测试连接</button>
+        <span class="hint" id="embTestResult" style="margin-left:8px"></span>
       </div>
     </div>
     <div class="m-foot">
@@ -410,7 +413,7 @@
 
 <script>
 // ==================== 基础 ====================
-const PAGE_VERSION = '0.9.31';
+const PAGE_VERSION = '1.0.0';
 const $ = id => document.getElementById(id);
 function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 2600); }
 function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -1271,6 +1274,23 @@ function openSettings() {
 
 function closeSettings() {
   $('settingsMask').classList.remove('show');
+}
+
+// Embedding 连通性测试（先保存当前输入，再调 /api/embedding/test）
+async function testEmbedding(btn) {
+  const el = $('embTestResult');
+  el.textContent = '测试中...';
+  btn.disabled = true;
+  try {
+    const emb = { base_url: $('cfgEmbBase').value.trim(), api_key: $('cfgEmbKey').value.trim(), model: $('cfgEmbModel').value.trim() };
+    await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ embedding: emb }) });
+    const d = await api('/api/embedding/test', { method: 'POST' });
+    el.textContent = d.result || '无返回';
+  } catch (e) {
+    el.textContent = '测试失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function saveSettings() {

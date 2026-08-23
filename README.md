@@ -3,6 +3,25 @@
 轻量演示：内层 Agent（OpenAI 兼容 API + 插件执行）+ 外层 Agent（本机 opencode CLI）自闭环。
 外层根据内层日志与插件状态提出插件增删改建议，经外层栏下方审批栏批准后自动快照、应用、热加载。
 
+> **v1.0.0 里程碑**：五层记忆系统（三层日常 + 任务归档 BM25 + 语义向量 RRF 混合检索）+ 框架级预取注入/自动归档 + hwj 终端智能体 + 一键安装发布链。零依赖（仅 Node 内置模块），Embedding 对接硅基流动免费 bge-m3。
+
+## Embedding 配置（语义记忆，推荐免费 bge-m3）
+
+语义记忆（`remember`/`recall` 混合检索）需要一个 OpenAI 兼容的 Embedding API，推荐硅基流动免费模型：
+
+| 配置项 | 填写值 |
+|---|---|
+| Base URL | `https://api.siliconflow.cn/v1` |
+| API Key | 你自己的 `sk-` 开头密钥 |
+| 模型名 | `BAAI/bge-m3` |
+
+**免费申请三步**：
+1. 打开 [cloud.siliconflow.cn/account/ak](https://cloud.siliconflow.cn/account/ak)，注册/登录硅基流动（手机号即可）
+2. 点「新建 API 密钥」→ 复制 `sk-` 开头的密钥
+3. 网页版右上角「设置 → Embedding API」填入三项 → 点「测试连接」看到"连接成功"即就绪（hwj 终端则运行 `/config` 向导）
+
+说明：`BAAI/bge-m3` 免费（1024 维，单条 8192 tokens），付费加速版为 `Pro/BAAI/bge-m3`；密钥仅存本机 `.data/config.json`（权限 600），与内层 API 同文件。未配置时 remember/recall 自动降级纯关键词检索，功能不阻断。
+
 ## hwj 终端智能体（v0.9.28 新增）
 
 内层 Agent 完整能力的终端封装（类 opencode TUI 形态，零依赖）：双击即用、双模式、意图闭环。
@@ -197,7 +216,8 @@ module.exports = {
 - **语义向量层**（`.memory-vector.json`，需配置 Embedding API）
   - `remember` 写入长期语义记忆：Embedding 生成稠密向量（L2 归一化 + Int8 量化，体积比 float JSON 小 5 倍）；高相似条目（余弦 >0.85）自动合并；存量无向量条目每次批量补嵌 10 条（渐进迁移）
   - `recall` 混合检索：稠密余弦 + BM25 稀疏两路召回 → RRF 倒数排名融合（k=60）；支持 `tags` 前置过滤与 `mode`（hybrid/vector/keyword）；**未配置 embedding 自动降级纯关键词，功能不阻断**
-  - Embedding 配置：网页版设置面板或 hwj `/config` 向导的「Embedding API」段（OpenAI 兼容 `/embeddings`，如硅基流动 `BAAI/bge-m3`），存 `.data/config.json` 与内层 API 同文件
+  - Embedding 配置：网页版设置面板或 hwj `/config` 向导的「Embedding API」段（见顶部[申请指引](#embedding-配置语义记忆推荐免费-bge-m3)），存 `.data/config.json` 与内层 API 同文件；配置界面的「测试连接」（网页按钮 / hwj 向导自动测试，即 `memory emb_test`）实时验证连通性并返回维度与耗时
+  - 硅基流动对接细节：批量嵌入每条截 480 字符（API 批量限 512 tokens、数组 ≤32 条的保护），单条调用上限 8192 tokens；Int8 量化适配任意维度返回（bge-m3 为 1024 维）
   - 规模建议：Int8 量化后每条 ~4KB，1 万条内全量加载毫秒级；更大规模建议按工作区分库
 - **框架级 push 注入与自动归档**（v0.9.31，对齐 Hermes 全对话生命周期记忆时序；server 与 hwj 同步生效）
   - **启动预取**：任务开始前用用户消息自动跨层检索（语义 recall top3 + 任务归档），命中即注入消息尾部并提示"已预取相关记忆"——pull 模型下模型不主动 search 的遵循度问题由此根治；整体 4s 超时保护，检索失败/为空静默跳过

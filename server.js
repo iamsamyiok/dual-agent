@@ -6,7 +6,7 @@ const path = require('path');
 const url = require('url');
 const { EventEmitter } = require('events');
 
-const APP_VERSION = '0.9.31';
+const APP_VERSION = '1.0.0';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -1008,10 +1008,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (p === '/api/config' && req.method === 'GET') { json(res, 200, { success: true, config: maskedConfig() }); return; }
-    if (p === '/api/config' && req.method === 'POST') {
+     if (p === '/api/config' && req.method === 'POST') {
       const body = await readBody(req);
       saveConfig(body);
       json(res, 200, { success: true, config: maskedConfig() });
+      return;
+    }
+     // Embedding 连通性测试（v1.0.0：网页设置面板「测试连接」按钮 → memory 插件 emb_test，转发工作区 ctx）
+     if (p === '/api/embedding/test' && req.method === 'POST') {
+      const out = await plugins.runPlugin('memory', { action: 'emb_test' }, { cwd: workspaceDir(), dataDir: DATA_DIR });
+      json(res, 200, { success: true, result: String(out) });
       return;
     }
 

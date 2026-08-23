@@ -59,16 +59,19 @@ async function runCommand(line, ctx) {
         core.saveInnerConfig({ base_url, api_key, model });
         ui.printInfo('配置已保存（与网页版共享 .data/config.json）');
       } catch (e) { ui.printError('保存失败：' + (e && e.message || e)); }
-      // embedding（语义记忆 remember/recall 用；三项全空可跳过，跳过时记忆检索降级关键词模式）
+      // embedding（语义记忆 remember/recall 用；推荐硅基流动免费 bge-m3；回车取推荐值，三项全空可跳过）
       const ec = cfg.embedding || {};
-      ui.printPlain('Embedding API（语义记忆用，OpenAI 兼容 /embeddings，如硅基流动 https://api.siliconflow.cn/v1 + BAAI/bge-m3）');
-      const e_url = await ask('Embedding Base URL（回车跳过）', ec.base_url || '');
-      if (e_url) {
-        const e_key = await ask('Embedding API Key', ec.api_key || '');
-        const e_model = await ask('Embedding 模型名（如 BAAI/bge-m3）', ec.model || '');
+      ui.printPlain('Embedding API（语义记忆用，OpenAI 兼容 /embeddings；推荐硅基流动免费 BAAI/bge-m3）');
+      ui.printPlain('  免费申请：https://cloud.siliconflow.cn/account/ak 注册/登录 → 新建 API 密钥 → 复制 sk- 开头密钥');
+      const e_url = await ask('Embedding Base URL（回车=' + (ec.base_url || 'https://api.siliconflow.cn/v1') + '，输入 none 跳过）', ec.base_url || 'https://api.siliconflow.cn/v1');
+      if (e_url && e_url.toLowerCase() !== 'none') {
+        const e_key = await ask('Embedding API Key（必填，sk- 开头）', ec.api_key || '');
+        const e_model = await ask('Embedding 模型名（回车=BAAI/bge-m3）', ec.model || 'BAAI/bge-m3');
         try {
           core.saveEmbeddingConfig({ base_url: e_url, api_key: e_key, model: e_model });
-          ui.printInfo(`Embedding 已配置（${e_model}），remember/recall 语义检索已启用`);
+          ui.printInfo('Embedding 配置已保存，正在测试连接...');
+          const out = await plugins.runPlugin('memory', { action: 'emb_test' }, { cwd: core.wsDir(ctx.ws), dataDir: core.DATA_DIR });
+          ui.printPlain(String(out));
         } catch (e) { ui.printError('Embedding 保存失败：' + (e && e.message || e)); }
       } else {
         ui.printInfo(ec.model ? 'Embedding 保持已有配置' : '未配置 Embedding（remember/recall 降级为关键词检索）');

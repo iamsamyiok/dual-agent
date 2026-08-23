@@ -9,6 +9,11 @@ const MAX_LONG = 20;
 const ARCHIVE_FILE = 'memory-archive.jsonl'; // 任务归档（user + finalText，JSONL 追加，无上限）
 const VECTOR_FILE = '.memory-vector.json';   // 语义记忆库（content + tags + Int8 量化稠密向量）
 const COS_MERGE = 0.85; // remember 自动合并阈值（对齐 Hermes 语义记忆）
+// Embedding 申请指引（硅基流动免费 bge-m3；remember 未配置提示 / emb_test 失败提示共用）
+const EMB_HELP = '推荐硅基流动免费模型 BAAI/bge-m3（1024 维，单条 8192 tokens）：\n' +
+  '1) 打开 https://cloud.siliconflow.cn/account/ak 注册/登录硅基流动；\n' +
+  '2) 点「新建 API 密钥」→ 复制 sk- 开头的密钥；\n' +
+  '3) 配置 base_url=https://api.siliconflow.cn/v1、api_key=你的密钥、model=BAAI/bge-m3（网页版设置面板或 hwj /config 向导均可填写）。';
 
 function memFiles(ctx) {
   return {
@@ -190,19 +195,22 @@ function readEmbeddingCfg(ctx) {
   } catch { return null; }
 }
 
-// OpenAI 兼容 /embeddings 调用（bge-m3 / text-embedding 等通用）；15s 超时
+// OpenAI 兼容 /embeddings 调用（硅基流动 BAAI/bge-m3 等通用）；15s 超时
+// 硅基流动批量限制：数组 ≤32 条且每条 ≤512 tokens（单条 string 调用为 8192）——
+// 统一截 480 字符兜底（记忆条目上限 1000 字符，前 480 字符的向量表征已足够检索）
 async function embedTexts(texts, cfgE) {
+  const input = texts.map(t => String(t).slice(0, 480));
   const url = String(cfgE.base_url).replace(/\/+$/, '') + '/embeddings';
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer ' + cfgE.api_key },
-    body: JSON.stringify({ model: cfgE.model, input: texts }),
+    body: JSON.stringify({ model: cfgE.model, input }),
     signal: AbortSignal.timeout(15000)
   });
   if (!res.ok) throw new Error(`embedding API HTTP ${res.status}：${(await res.text().catch(() => '')).slice(0, 200)}`);
   const j = await res.json();
   const arr = (j && j.data || []).map(x => x && x.embedding).filter(Array.isArray);
-  if (arr.length !== texts.length) throw new Error(`embedding 返回 ${arr.length} 条，期望 ${texts.length} 条`);
+  if (arr.length !== input.length) throw new Error(`embedding 返回 ${arr.length} 条，期望 ${input.length} 条`);
   return arr;
 }
 
@@ -225,8 +233,8 @@ module.exports = {
     properties: {
       action: {
         type: 'string',
-        enum: ['save', 'search', 'list', 'delete', 'consolidate', 'archive_save', 'archive_search', 'remember', 'recall'],
-        description: 'save/search/list/delete=三层记忆管理；consolidate=短期归并为长期；archive_save=归档完整任务记录（用户消息+最终交付）；archive_search=BM25 全文检索历史任务归档；remember=写入长期语义记忆（经验/事实/方案，支持向量语义检索）；recall=语义混合检索（稠密向量+BM25 关键词 RRF 融合，embedding 未配置时自动降级关键词）'
+        enum: ['save', 'search', 'list', 'delete', 'consolidate', 'archive_save', 'archive_search', 'remember', 'recall', 'emb_test'],
+        description: 'save/search/list/delete=三层记忆管理；consolidate=短期归并为长期；archive_save=归档完整任务记录（用户消息+最终交付）；archive_search=BM25 全文检索历史任务归档；remember=写入长期语义记忆（经验/事实/方案，支持向量语义检索）；recall=语义混合检索（稠密向量+BM25 关键词 RRF 融合，embedding 未配置时自动降级关键词）；emb_test=测试 Embedding API 连通性（配置界面保存后验证用）'
       },
       level: {
         type: 'string',
@@ -447,6 +455,21 @@ module.exports = {
       return `归档匹配 ${hits.length} 条（BM25 相关度排序）：\n${lines.join('\n')}`;
     }
 
+    // ========== emb_test：Embedding API 连通性测试（配置界面保存后验证） ==========
+    if (action === 'emb_test') {
+      const cfgE = readEmbeddingCfg(ctx);
+      if (!cfgE) {
+        return '未配置 embedding（.data/config.json 的 embedding 段缺 base_url / api_key / model）。\n' + EMB_HELP;
+      }
+      const t0 = Date.now();
+      try {
+        const [v] = await embedTexts(['连通性测试'], cfgE);
+        return `连接成功：${cfgE.model} @ ${cfgE.base_url}，返回 ${v.length} 维向量，耗时 ${Date.now() - t0}ms。语义记忆 remember/recall 已就绪`;
+      } catch (e) {
+        return `连接失败：${e && e.message || e}\n请检查三项配置（base_url 须含 /v1、api_key 以 sk- 开头、model 如 BAAI/bge-m3）。${EMB_HELP}`;
+      }
+    }
+
     // ========== remember：写入语义记忆（稠密向量 + 原文，供 recall 混合检索） ==========
     if (action === 'remember') {
       const content = String(args.content || '').trim();
@@ -460,7 +483,7 @@ module.exports = {
       // embedding 可用则生成稠密向量（归一化 Int8 量化）
       const cfgE = readEmbeddingCfg(ctx);
       let dense = null;
-      let note = '未配置 embedding（.data/config.json 的 embedding 段），当前仅关键词可检索；配置后重新 remember 同条内容可启用语义检索';
+      let note = `未配置 embedding，当前仅关键词可检索。${EMB_HELP}`;
       if (cfgE) {
         try {
           // 渐进式 backfill：为无向量的存量条目补嵌（每次最多 10 条，与新内容合并成一次 API 调用）
