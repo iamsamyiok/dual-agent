@@ -75,24 +75,6 @@
   .composer .stop-btn.show { display: flex; }
   body { overflow-x: hidden; }
 
-  /* ---- 会话标签条（移动端隐藏，桌面端可见） ---- */
-  #sessRail { width: 44px; flex-shrink: 0; background: #1e293b; display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 8px; overflow-y: auto; scrollbar-width: none; border-radius: 0; }
-  #sessRail::-webkit-scrollbar { display: none; }
-  #sessRail .sr-add { width: 32px; height: 32px; border-radius: 50%; border: 1.5px dashed #64748b; color: #94a3b8; background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background .15s; }
-  #sessRail .sr-add:hover { background: rgba(255,255,255,.08); }
-  #sessRail .sr-tab { width: 32px; height: 32px; border-radius: 50%; border: none; background: #334155; color: #cbd5e1; font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background .15s, transform .1s; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; }
-  #sessRail .sr-tab span { display: block; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
-  #sessRail .sr-tab.cur { background: #3b82f6; color: #fff; box-shadow: 0 0 0 2px #1e293b; }
-  #sessRail .sr-tab:active { transform: scale(.9); }
-  #sessRail .sr-tab[title]:hover::after { content: attr(title); position: absolute; left: 44px; background: #1e293b; color: #e2e8f0; padding: 4px 8px; border-radius: 6px; font-size: 11px; white-space: nowrap; z-index: 30; pointer-events: none; }
-  #sessRail .sr-add { width: 30px; height: 30px; border-radius: 50%; border: 1.5px dashed #64748b; color: #94a3b8; background: none; font-size: 20px; line-height: 1; cursor: pointer; flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: background .15s; }
-  #sessRail .sr-add:hover { background: rgba(255,255,255,.08); }
-  #sessRail .sr-tab { width: 32px; height: 32px; border-radius: 50%; border: none; background: #334155; color: #cbd5e1; font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background .15s, transform .1s; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; }
-  #sessRail .sr-tab span { display: block; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
-  #sessRail .sr-tab.cur { background: var(--primary); color: #fff; box-shadow: 0 0 0 2px #1e293b; }
-  #sessRail .sr-tab:active { transform: scale(.9); }
-  #sessRail .sr-tab[title]:hover::after { content: attr(title); position: absolute; left: 44px; background: #1e293b; color: #e2e8f0; padding: 4px 8px; border-radius: 6px; font-size: 11px; white-space: nowrap; z-index: 30; pointer-events: none; }
-
   /* ---- 滚动导航 ---- */
   .scroll-nav { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 10px; z-index: 5; }
   .scroll-nav button { width: 38px; height: 38px; border-radius: 50%; border: none; background: rgba(30, 41, 59, .88); color: #fff; font-size: 16px; cursor: pointer; display: none; box-shadow: var(--shadow-lg); transition: background .15s, transform .1s; align-items: center; justify-content: center; }
@@ -205,34 +187,49 @@
   body.mobile-mode .col-head { padding: 8px 12px; flex-shrink: 0; }
   body.mobile-mode .col-head .toggle-btn { display: none !important; }
   body.mobile-mode .msg { max-width: 88%; font-size: 14px; }
-  body.mobile-mode .composer input, body.mobile-mode .composer textarea { font-size: 16px; } /* 防 iOS 聚焦缩放 */
+  body.mobile-mode .composer input, body.mobile-mode .composer textarea { font-size: 16px; }
   body.mobile-mode .composer { padding: 10px 12px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
   body.mobile-mode .chat-body { padding: 12px; }
   body.mobile-mode .col { display: flex; flex-direction: column; min-height: 0; }
   body.mobile-mode .col.collapsed { display: none; }
-  /* ---- 折叠按钮（右侧边缘触发会话栏弹出） ---- */
-  .sess-toggle { position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 28px; height: 64px; background: #1e293b; border-radius: 0 10px 10px 0; display: none; align-items: center; justify-content: center; cursor: pointer; z-index: 15; box-shadow: 2px 0 8px rgba(0,0,0,.2); transition: background .2s; }
-  .sess-toggle:hover { background: #334155; }
-  .sess-toggle svg { width: 16px; height: 16px; color: #e2e8f0; }
-  .sess-toggle.open svg { transform: rotate(180deg); }
-  body.mobile-mode #sessRail { display: none; width: 260px; position: absolute; left: -260px; top: 0; bottom: 0; z-index: 30; box-shadow: 4px 0 16px rgba(0,0,0,.3); border-radius: 0; padding: 16px 0; align-items: flex-start; }
-  body.mobile-mode #sessRail.open { display: flex; left: 0; }
-  body.mobile-mode .sess-toggle { display: flex; }
-  body.mobile-mode #innerCol { padding-left: 0; }
-  body.mobile-mode #sessRail .sr-add { width: 44px; height: 44px; font-size: 20px; margin: 0 0 8px 0; }
-  body.mobile-mode #sessRail .sr-tab { width: 44px; height: 44px; font-size: 11px; border-radius: 8px; }
-  body.mobile-mode #sessRail .sr-tab span { font-size: 11px; padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   body.mobile-mode .scroll-nav { right: 8px; }
   body.mobile-mode .scroll-nav button { width: 36px; height: 36px; font-size: 15px; }
+  body.mobile-mode .hist-drawer { width: 100vw; max-width: 100vw; left: -100vw; }
+  body.mobile-mode header .hd-btn { padding: 5px 8px; font-size: 11px; gap: 3px; }
+  body.mobile-mode header .hd-btn svg { width: 13px; height: 13px; }
 
   /* ---- 图标优化 ---- */
   header .hd-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
   #innerScrollNav button svg, #outerScrollNav button svg { width: 16px; height: 16px; }
-  .sr-tab { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
   .msg .who svg { width: 13px; height: 13px; flex-shrink: 0; }
   .composer button svg { width: 18px; height: 18px; }
   .busy-tip svg { animation: pulse 1.5s ease-in-out infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+
+  /* ---- 历史对话抽屉 ---- */
+  .hist-drawer { position: fixed; top: 0; left: -360px; width: 340px; max-width: 85vw; height: 100vh; background: var(--surface); z-index: 100; box-shadow: 4px 0 20px rgba(0,0,0,.25); transition: left .25s cubic-bezier(.4,0,.2,1); display: flex; flex-direction: column; }
+  .hist-drawer.open { left: 0; }
+  .hist-drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 99; display: none; }
+  .hist-drawer-overlay.open { display: block; }
+  .hist-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--border); background: linear-gradient(135deg, #1e293b, #334155); color: #fff; flex-shrink: 0; }
+  .hist-head h3 { font-size: 15px; font-weight: 700; flex: 1; }
+  .hist-head button { background: rgba(255,255,255,.15); border: none; color: #e2e8f0; border-radius: 8px; width: 32px; height: 32px; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+  .hist-head button:hover { background: rgba(255,255,255,.25); }
+  .hist-search { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .hist-search input { width: 100%; border: 2px solid var(--border); border-radius: 10px; padding: 9px 12px; font-size: 14px; outline: none; background: var(--bg); color: var(--text); }
+  .hist-search input:focus { border-color: var(--primary); }
+  .hist-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+  .hist-item { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; border-bottom: 1px solid var(--surface-2); transition: background .15s; }
+  .hist-item:hover { background: var(--surface-2); }
+  .hist-item.active { background: #eff6ff; border-left: 3px solid var(--primary); padding-left: 13px; }
+  .hist-item-icon { width: 36px; height: 36px; border-radius: 50%; background: var(--surface-3); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 14px; }
+  .hist-item.cur .hist-item-icon { background: var(--primary); color: #fff; }
+  .hist-item-body { flex: 1; min-width: 0; }
+  .hist-item-name { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hist-item-meta { font-size: 11px; color: var(--text-ter); margin-top: 2px; }
+  .hist-item-del { background: none; border: none; color: var(--text-ter); cursor: pointer; font-size: 16px; padding: 4px 6px; border-radius: 6px; flex-shrink: 0; }
+  .hist-item-del:hover { color: var(--danger); background: #fef2f2; }
+  .hist-empty { padding: 40px 16px; text-align: center; color: var(--text-ter); font-size: 13px; }
 </style>
 </head>
 <body>
@@ -242,8 +239,12 @@
      <span class="sub">工作空间生命体 · 自锻造进化</span>
      <span class="hd-tag" id="tagInner">内层：未配置</span>
      <span class="hd-tag" id="tagOc">OpenCode：检测中…</span>
-      <span class="grow"></span>
-       <button class="hd-btn" id="hdApproval" onclick="openApprovalMobi()" title="Agent 插件改进建议审批（有待审批项时高亮）">
+       <span class="grow"></span>
+        <button class="hd-btn" id="hdHistory" onclick="openHistDrawer()" title="查看历史对话（可搜索、切换、删除）">
+         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+         历史
+        </button>
+        <button class="hd-btn" id="hdApproval" onclick="openApprovalMobi()" title="Agent 插件改进建议审批（有待审批项时高亮）">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
         审批<span id="apBadge">0</span>
        </button>
@@ -259,18 +260,24 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         帮助
        </button>
-    </header>
+     </header>
 
-   <main>
-      <!-- 折叠按钮：点击弹出/收起会话标签栏（移动端） -->
-      <div class="sess-toggle" id="sessToggle" onclick="toggleSessionRail()" title="会话列表">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+    <main>
+      <!-- 历史对话抽屉 -->
+      <div class="hist-drawer-overlay" id="histDrawerOverlay" onclick="closeHistDrawer()"></div>
+      <div class="hist-drawer" id="histDrawer">
+        <div class="hist-head">
+          <h3>历史对话</h3>
+          <span style="font-size:11px;color:#94a3b8" id="histCount"></span>
+          <button onclick="closeHistDrawer()" title="关闭">✕</button>
+        </div>
+        <div class="hist-search">
+          <input id="histSearchInput" type="text" placeholder="搜索对话标题…" oninput="filterHistList(this.value)">
+        </div>
+        <div class="hist-list" id="histList"></div>
       </div>
 
-      <!-- 左缘细条：会话标签（点击切换 / 长按删除 / + 新建） -->
-      <nav id="sessRail" title="会话标签：点击切换，长按删除"></nav>
-
-     <!-- 左：插件管理 -->
+      <!-- 左：插件管理 -->
      <section class="col" id="pluginCol">
        <div class="col-head">
          <span>插件管理</span>
@@ -300,7 +307,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;vertical-align:-2px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
           过程
         </button>
-        <button class="mini-btn" onclick="resetInnerChat()" title="归档当前对话并开启新会话（旧对话在左侧标签可找回）">
+        <button class="mini-btn" onclick="resetInnerChat()" title="归档当前对话并开启新会话（旧对话在「历史对话」可找回）">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;vertical-align:-2px"><path d="M12 5v14M5 12h14"/></svg>
           新会话
         </button>
@@ -880,105 +887,85 @@ async function loadInnerHistory() {
   }
 }
 async function resetInnerChat() {
-  if (!confirm('开启新会话？（当前对话归档到左侧标签，随时可点回；插件与记忆不受影响）')) return;
+  if (!confirm('开启新会话？（当前对话归档到「历史对话」，随时可点回；插件与记忆不受影响）')) return;
   const d = await api('/api/inner/reset', { method: 'POST' });
-  if (d.success) { await loadInnerHistory(); loadSessions(); toast('已开启新会话'); }
+  if (d.success) { await loadInnerHistory(); toast('已开启新会话'); }
 }
 
-  // ==================== 会话标签条（左侧可折叠面板） ====================
-let sessList = [], sessCurrent = '';
-let sessRailOpen = false;
-async function toggleSessionRail() {
-  const rail = $('sessRail');
-  const tog = $('sessToggle');
-  sessRailOpen = !sessRailOpen;
-  if (sessRailOpen) {
-    await loadSessions();
-    rail.classList.add('open');
-    tog.classList.add('open');
-  } else {
-    rail.classList.remove('open');
-    tog.classList.remove('open');
-  }
+// ==================== 历史对话抽屉 ====================
+let sessList = [], sessCurrent = '', histFiltered = [];
+async function openHistDrawer() {
+  await loadSessions();
+  renderHistList();
+  $('histDrawer').classList.add('open');
+  $('histDrawerOverlay').classList.add('open');
+  $('histSearchInput').value = '';
+  filterHistList('');
+}
+function closeHistDrawer() {
+  $('histDrawer').classList.remove('open');
+  $('histDrawerOverlay').classList.remove('open');
 }
 async function loadSessions() {
   const d = await api('/api/sessions');
   sessList = d.sessions || [];
   sessCurrent = d.current || '';
-  renderSessRail();
+  $('histCount').textContent = sessList.length + ' 条';
 }
-function renderSessRail() {
-  const rail = $('sessRail');
-  // 清除旧内容但保留 .sr-list 容器（如有）
-  rail.innerHTML = '';
-  // 添加按钮
-  const addBtn = document.createElement('button');
-  addBtn.className = 'sr-add';
-  addBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:18px;height:18px"><path d="M12 5v14M5 12h14"/></svg>';
-  addBtn.title = '新建会话';
-  addBtn.onclick = newSession;
-  rail.appendChild(addBtn);
-  // 分隔线
-  const sep = document.createElement('div');
-  sep.style.cssText = 'width:24px;height:1px;background:#334155;margin:4px 0;flex-shrink:0;';
-  rail.appendChild(sep);
-  // 会话列表
-  for (const s of sessList) {
-    const b = document.createElement('button');
-    b.className = 'sr-tab' + (s.id === sessCurrent ? ' cur' : '');
-    const name = (s.name || s.id).slice(0, 6);
-    b.innerHTML = `<span>${name}</span>`;
-    b.title = `${s.name || ''}（${s.n || 0} 条消息）\n点击切换 · 长按删除`;
-    // 点击切换；长按 600ms 弹删除
-    let holdTimer = null, fired = false;
-    const startHold = () => { fired = false; holdTimer = setTimeout(() => { fired = true; deleteSession(s.id); }, 600); };
-    const cancelHold = () => { if (holdTimer) clearTimeout(holdTimer); };
-    b.addEventListener('touchstart', startHold, { passive: true });
-    b.addEventListener('touchend', e => { cancelHold(); if (fired) { e.preventDefault(); e.stopPropagation(); } }, true);
-    b.addEventListener('touchmove', cancelHold, { passive: true });
-    b.addEventListener('mousedown', startHold);
-    b.addEventListener('mouseup', cancelHold);
-    b.addEventListener('mouseleave', cancelHold);
-    b.addEventListener('contextmenu', e => { e.preventDefault(); deleteSession(s.id); });
-    b.onclick = e => { if (!fired && s.id !== sessCurrent) switchSession(s.id); };
-    rail.appendChild(b);
+function formatTime(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const diff = now - d;
+  if (diff < 60000) return '刚刚';
+  if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
+  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+}
+function renderHistList(filter) {
+  const box = $('histList');
+  const q = (filter || '').toLowerCase().trim();
+  histFiltered = sessList.filter(s => {
+    if (!q) return true;
+    return (s.name || '').toLowerCase().includes(q) || s.id.includes(q);
+  });
+  if (histFiltered.length === 0) {
+    box.innerHTML = '<div class="hist-empty">暂无历史对话</div>';
+    return;
   }
+  box.innerHTML = histFiltered.map(s => {
+    const name = s.name || '未命名';
+    const time = formatTime(s.ts);
+    const msgs = s.n || 0;
+    const cur = s.id === sessCurrent ? ' active cur' : '';
+    return `<div class="hist-item${cur}" onclick="selectHistSession('${esc(s.id)}')">
+      <div class="hist-item-icon">${s.id === sessCurrent ? '●' : '💬'}</div>
+      <div class="hist-item-body">
+        <div class="hist-item-name">${esc(name)}</div>
+        <div class="hist-item-meta">${time} · ${msgs} 条消息</div>
+      </div>
+      ${s.id !== sessCurrent ? `<button class="hist-item-del" onclick="event.stopPropagation();delHistSession('${esc(s.id)}')" title="删除">✕</button>` : ''}
+    </div>`;
+  }).join('');
 }
-async function newSession() {
-  const d = await api('/api/sessions/new', { method: 'POST' });
-  if (d.success) { sessList = d.sessions; sessCurrent = d.current; renderSessRail(); await loadInnerHistory(); toast('已开启新会话'); }
-}
-async function switchSession(id) {
+function filterHistList(val) { renderHistList(val); }
+async function selectHistSession(id) {
   const d = await api('/api/sessions/switch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
   if (d.success) {
     sessCurrent = d.current;
-    const box = $('innerMsgs');
-    box.innerHTML = '';
-    for (const m of (d.messages || [])) {
-      if (m.role === 'user') appendMsg('innerMsgs', 'user', m.content, '我');
-      else if (m.role === 'assistant' && m.content) { const el = appendMsg('innerMsgs', 'assistant', m.content, '内层 Agent'); if (typeof setMsgHTML === 'function') setMsgHTML(el._text, m.content); }
-    }
-    renderSessRail();
+    await loadInnerHistory();
+    closeHistDrawer();
     toast('已切换会话');
-    // 切换后收起面板
-    if (sessRailOpen) toggleSessionRail();
   }
 }
-async function deleteSession(id) {
+async function delHistSession(id) {
   const s = sessList.find(x => x.id === id);
-  if (!confirm(`删除会话「${s ? s.name : id}」及其全部聊天记录？\n（不可恢复）`)) return;
+  if (!confirm(`删除会话「${s ? s.name : id}」及其全部聊天记录？`)) return;
   const d = await api('/api/sessions/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
   if (d.success) {
-    sessList = d.sessions; sessCurrent = d.current;
-    const box = $('innerMsgs');
-    box.innerHTML = '';
-    for (const m of (d.messages || [])) {
-      if (m.role === 'user') appendMsg('innerMsgs', 'user', m.content, '我');
-      else if (m.role === 'assistant' && m.content) { const el = appendMsg('innerMsgs', 'assistant', m.content, '内层 Agent'); if (typeof setMsgHTML === 'function') setMsgHTML(el._text, m.content); }
-    }
-    renderSessRail();
+    await loadInnerHistory();
+    await loadSessions();
+    renderHistList($('histSearchInput').value);
     toast('会话已删除');
-    if (sessRailOpen) toggleSessionRail();
   }
 }
 function jumpScroll(boxId, pos) {
@@ -1675,9 +1662,8 @@ detectMobileMode();
 loadHealth();
 loadPlugins();
 loadProposals();
-loadWorkspaces();
+    loadWorkspaces();
 loadInnerHistory();
-loadSessions();
 bindScrollNav();
 recoverRunningTask();
 pollReviewHint();
