@@ -5,6 +5,35 @@
 
 > **v1.0.0 里程碑**：五层记忆系统（三层日常 + 任务归档 BM25 + 语义向量 RRF 混合检索）+ 框架级预取注入/自动归档 + hwj 终端智能体 + 一键安装发布链。零依赖（仅 Node 内置模块），Embedding 对接硅基流动免费 bge-m3。
 
+## 安装（npm，v1.1.0 起）
+
+```bash
+# 全局安装（推荐）
+npm i -g hwj-agent
+hwj                      # 终端智能体 TUI（Windows/macOS/Linux 通用）
+hwj run "创建 hello.txt 写入问候语"   # 非交互单次任务
+hwj gui                  # Web 界面（自动挑端口）
+
+# 免安装试跑
+npx hwj-agent run "演示任务"
+```
+
+无 npm 环境：Windows 双击 `hwj.bat` / `install.bat`，macOS/Linux 双击 `hwj.command`。首次使用输入 `/config` 配置 API（或 `hwj gui` 网页配置）。
+
+### SDK（两行代码调用）
+
+```js
+const { chat } = require('hwj-agent');
+
+const answer = await chat({ baseUrl, apiKey, model, message: '一句话解释 RRF' });
+```
+
+- `chat(opts)` 单轮问答（`tools: true` 开启插件工具流）
+- `run(opts)` 单任务完整编排（注入/工具流/核验/自动归档，返回 `{ ok, finalText }`）
+- `create(preset)` 预置配置的可复用实例
+- API 三项可省略：回落共享 `.data/config.json`（与 TUI/网页版互通）；`DUAL_AGENT_MOCK=1` 离线演示
+- 详见 `lib/sdk.js` 头注释
+
 ## Embedding 配置（语义记忆，推荐免费 bge-m3）
 
 语义记忆（`remember`/`recall` 混合检索）需要一个 OpenAI 兼容的 Embedding API，推荐硅基流动免费模型：

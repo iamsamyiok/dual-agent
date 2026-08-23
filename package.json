@@ -1,9 +1,47 @@
 {
-  "name": "dual-agent-loop",
-  "version": "1.0.0",
-  "private": true,
-  "description": "双层 Agent 自迭代系统 — 内层执行 + 外层迭代插件（零依赖 demo）",
+  "name": "hwj-agent",
+  "version": "1.1.0",
+  "description": "双层 Agent 自迭代系统 — 内层执行 Agent（插件工具流）+ 外层评审迭代 + hwj 终端智能体，零依赖",
+  "main": "index.js",
+  "bin": {
+    "hwj": "bin/hwj.js",
+    "hwj-agent": "bin/hwj.js"
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "plugins/",
+    "hwj/",
+    "bin/",
+    "public/",
+    "server.js",
+    "hwj.command",
+    "hwj.bat",
+    "install.bat",
+    "uninstall.bat"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "agent",
+    "cli",
+    "tui",
+    "llm",
+    "openai",
+    "zero-dependency",
+    "memory",
+    "embeddings",
+    "rag"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iamsamyiok/dual-agent.git"
+  },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node test/smoke.js && node test/hwj-smoke.js && node test/memory-smoke.js",
+    "prepublishOnly": "node test/smoke.js && node test/hwj-smoke.js && node test/memory-smoke.js"
   }
 }
