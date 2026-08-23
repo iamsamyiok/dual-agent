@@ -6,7 +6,7 @@ const path = require('path');
 const url = require('url');
 const { EventEmitter } = require('events');
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const PORT = Number(process.argv.includes('--port') ? process.argv[process.argv.indexOf('--port') + 1] : (process.env.PORT || 3788));
 const ROOT = __dirname;
 const DATA_DIR = process.env.DUAL_AGENT_DATA || path.join(ROOT, '.data');
@@ -1045,10 +1045,75 @@ const server = http.createServer(async (req, res) => {
     }
      // Embedding 连通性测试（v1.0.0：网页设置面板「测试连接」按钮 → memory 插件 emb_test，转发工作区 ctx）
      if (p === '/api/embedding/test' && req.method === 'POST') {
-      const out = await plugins.runPlugin('memory', { action: 'emb_test' }, { cwd: workspaceDir(), dataDir: DATA_DIR });
-      json(res, 200, { success: true, result: String(out) });
-      return;
-    }
+       const out = await plugins.runPlugin('memory', { action: 'emb_test' }, { cwd: workspaceDir(), dataDir: DATA_DIR });
+       json(res, 200, { success: true, result: String(out) });
+       return;
+     }
+     // 内层 LLM 连通性测试：body 指定 base_url/api_key/model（缺省回落已存配置），发 max_tokens=4 最小请求
+     if (p === '/api/llm/test' && req.method === 'POST') {
+       const body = await readBody(req);
+       const cfg = getConfig();
+       const base = String(body.base_url || (cfg.inner && cfg.inner.base_url) || '').trim();
+       const key = String(body.api_key || (cfg.inner && cfg.inner.api_key) || '').trim();
+       const model = String(body.model || (cfg.inner && cfg.inner.model) || '').trim();
+       if (!base || !key || !model) { json(res, 200, { ok: false, result: '请先填写 Base URL / API Key / 模型名' }); return; }
+       const t0 = Date.now();
+       try {
+         const proto = base.startsWith('http:') ? require('http') : require('https');
+         const reply = await new Promise((resolve, reject) => {
+           const reqq = proto.request(`${base.replace(/\/+$/, '')}/chat/completions`, {
+             method: 'POST',
+             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+             timeout: 15000,
+           }, r2 => {
+             let buf = '';
+             r2.on('data', c => { buf += c; });
+             r2.on('end', () => {
+               if (r2.statusCode >= 200 && r2.statusCode < 300) {
+                 try { const j = JSON.parse(buf); const msg = j.choices && j.choices[0] && j.choices[0].message; resolve({ ok: true, text: `连通正常（${Date.now() - t0}ms）：模型 ${j.model || model} 回复「${String((msg && msg.content) || '').slice(0, 40)}」` }); }
+                 catch { resolve({ ok: false, text: '响应非 JSON：' + buf.slice(0, 120) }); }
+               } else {
+                 let hint = `HTTP ${r2.statusCode}`;
+                 try { const j = JSON.parse(buf); if (j.error && j.error.message) hint += '：' + j.error.message; } catch { /* 保留状态码 */ }
+                 if (r2.statusCode === 401) hint += '（Key 无效或过期）';
+                 if (r2.statusCode === 404) hint += '（Base URL 可能少了或多了 /v1）';
+                 resolve({ ok: false, text: hint });
+               }
+             });
+           });
+           reqq.on('timeout', () => { reqq.destroy(new Error('超时（15s）：地址不可达或网络受限')); });
+           reqq.on('error', e => reject(e));
+           reqq.end(JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 4, stream: false }));
+         });
+         json(res, 200, { ok: reply.ok, result: reply.text });
+       } catch (e) {
+         json(res, 200, { ok: false, result: '连接失败：' + String(e.message || e) });
+       }
+       return;
+     }
+     // 一键清除历史文件：清各工作区会话/过程/用量 + 审计/快照；保留配置、插件、记忆、技能
+     if (p === '/api/cleanup' && req.method === 'POST') {
+       let removed = 0, bytes = 0;
+       const hit = fp => { try { bytes += fs.statSync(fp).size; } catch { /* ignore */ } removed++; };
+       const rm = fp => { try { if (fs.existsSync(fp)) { hit(fp); fs.rmSync(fp, { recursive: true, force: true }); } } catch { /* ignore */ } };
+       try {
+         for (const ws of listWorkspaces()) {
+           const dir = path.join(WS_ROOT, ws);
+           rm(path.join(dir, 'inner-messages.json'));
+           rm(path.join(dir, 'process.md'));
+           rm(path.join(dir, 'inner-usage.json'));
+           rm(path.join(dir, 'sessions'));
+         }
+         rm(path.join(DATA_DIR, 'audit.json'));
+         rm(path.join(DATA_DIR, 'snapshots'));
+         // 清后重载当前会话视图（内存态同步）
+         try { loadInnerMessages(); } catch { /* ignore */ }
+         json(res, 200, { ok: true, removed, bytes, message: '聊天记录与运行痕迹已清除（配置、插件、记忆、技能保留）' });
+       } catch (e) {
+         json(res, 200, { ok: false, removed, bytes, error: String(e.message || e) });
+       }
+       return;
+     }
 
     // ---------- 多工作区 ----------
     if (p === '/api/workspaces' && req.method === 'GET') {

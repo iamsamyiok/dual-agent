@@ -109,11 +109,13 @@
    .toolsummary .ts-arg { color: #6b7280; }
    .toolsummary .ts-hint { margin-left: auto; flex-shrink: 0; font-size: 10.5px; color: #93c5fd; }
   .composer { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #e5e7eb; flex-shrink: 0; }
-  .composer input { flex: 1; border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; outline: none; }
-  .composer input:focus { border-color: #3b82f6; }
-  .composer input:disabled { background: #f3f4f6; color: #9ca3af; }
+  .composer input, .composer textarea { flex: 1; min-width: 0; border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 12px; font-size: 12.5px; outline: none; }
+  .composer textarea { resize: none; height: 58px; line-height: 1.5; font-family: inherit; max-height: 120px; }
+  .composer input:focus, .composer textarea:focus { border-color: #3b82f6; }
+  .composer input:disabled, .composer textarea:disabled { background: #f3f4f6; color: #9ca3af; }
   .composer button { background: #3b82f6; color: #fff; border: none; border-radius: 8px; padding: 0 16px; cursor: pointer; font-size: 12.5px; }
   .composer button:disabled { background: #93c5fd; cursor: not-allowed; }
+  body { overflow-x: hidden; }
   .busy-tip { font-size: 11px; color: #f59e0b; padding: 0 12px 6px; display: none; }
 
   /* 右栏建议卡片 */
@@ -189,10 +191,14 @@
   body.mobile-mode #innerCol { flex: 1 1 auto; max-width: 100%; }
   body.mobile-mode header .sub, body.mobile-mode #tagOc { display: none; }
   body.mobile-mode header .hd-btn { padding: 4px 8px; font-size: 11px; }
-  body.mobile-mode .col-head { padding: 6px 10px; }
+  body.mobile-mode .col-head { padding: 6px 10px; flex-shrink: 0; }
+  body.mobile-mode .col-head .toggle-btn { display: none !important; } /* 主界面常驻，无需折叠叉 */
   body.mobile-mode .msg { max-width: 88%; font-size: 13.5px; }
-  body.mobile-mode .composer input { font-size: 15px; } /* ≥16px 防 iOS 聚焦缩放，15 折中 */
+  body.mobile-mode .composer input, body.mobile-mode .composer textarea { font-size: 15px; } /* 防 iOS 聚焦缩放 */
+  body.mobile-mode .composer { padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
   body.mobile-mode .chat-body { padding: 10px; }
+  body.mobile-mode .col { display: flex; flex-direction: column; min-height: 0; }
+  body.mobile-mode .col.collapsed { display: none; } /* 折叠态彻底隐藏（无窄条需求） */
 </style>
 </head>
 <body>
@@ -231,7 +237,7 @@
     <!-- 中：内层对话 -->
     <section class="col active" id="innerCol">
       <div class="col-head">
-        <span>内层 Agent</span>
+        <span>HWJ agent</span>
          <span class="hint" id="innerModelTag"></span>
          <span class="hint" id="tokBadge" style="display:none;color:#059669" title="本会话真实 token 用量（API 返回，含缓存命中）；口径为每次调用全量重发上下文的计费累计"></span>
         <span class="grow" style="flex:1"></span>
@@ -241,12 +247,12 @@
       </div>
       <div class="chat-body" id="innerMsgs"></div>
       <div class="busy-tip" id="innerBusy">执行中… 完整过程已实时记录到 process.md（双击任务汇总条或点顶部「过程」查看）</div>
-      <div class="composer">
-         <button class="mini-btn" id="uploadBtn" onclick="$('fileInput').click()" title="上传本地文档到当前工作区（PDF/DOCX/XLSX 自动提取文本，txt/md 直读）" style="flex:none">📎</button>
-         <input type="file" id="fileInput" style="display:none" multiple>
-         <input id="innerInput" placeholder="给内层下任务（执行中输入锁定）" autocomplete="off">
-         <button id="innerSendBtn" onclick="innerSend()">发送</button>
-       </div>
+       <div class="composer">
+          <button class="mini-btn" id="uploadBtn" onclick="$('fileInput').click()" title="上传本地文档到当前工作区（PDF/DOCX/XLSX 自动提取文本，txt/md 直读）" style="flex:none">📎</button>
+          <input type="file" id="fileInput" style="display:none" multiple>
+          <textarea id="innerInput" rows="2" placeholder="给 HWJ agent 下任务（执行中输入锁定）" autocomplete="off"></textarea>
+          <button id="innerSendBtn" onclick="innerSend()" style="flex:none">发送</button>
+        </div>
       <div class="col-rail" onclick="toggleCol('innerCol')" title="展开内层对话"><span class="rail-arrow">»</span><span class="rail-title">内层 Agent</span></div>
     </section>
 
@@ -295,20 +301,6 @@
     <div class="m-body frm">
       <div class="setting-row">
         <label class="toggle-label">
-          <input type="checkbox" id="settingPluginPanel" checked onchange="togglePluginPanel(this.checked)">
-          <span>启用左侧插件管理面板</span>
-        </label>
-        <span class="hint">折叠后可通过点击面板窄条重新展开</span>
-      </div>
-      <div class="setting-row">
-        <label class="toggle-label">
-          <input type="checkbox" id="settingOuterPanel" checked onchange="toggleOuterPanel(this.checked)">
-          <span>启用外层 Agent 面板</span>
-        </label>
-        <span class="hint">关闭后仅显示内层 Agent 和内存管理</span>
-      </div>
-      <div class="setting-row">
-        <label class="toggle-label">
           <input type="checkbox" id="settingIntentSystem" checked onchange="toggleIntentSystem(this.checked)">
           <span>启用意图契约系统</span>
         </label>
@@ -323,6 +315,8 @@
         <input id="cfgKey" type="password" placeholder="sk-...">
         <label>模型名（如 Qwen/Qwen3-8B）</label>
         <input id="cfgModel" placeholder="provider/model">
+        <button class="mini-btn" style="margin-top:6px" onclick="testInnerLlm(this)">测试连接</button>
+        <span class="hint" id="llmTestResult" style="margin-left:8px"></span>
         <label style="margin-top:10px">多路 API（可选）：子智能体并行时轮转分摊，防单端点速率限制</label>
         <div id="cfgProfiles"></div>
         <button class="mini-btn" style="margin-top:4px" onclick="addProfileRow()">+ 添加一路</button>
@@ -340,6 +334,13 @@
         <input id="cfgEmbModel" placeholder="BAAI/bge-m3">
         <button class="mini-btn" style="margin-top:6px" onclick="testEmbedding(this)">测试连接</button>
         <span class="hint" id="embTestResult" style="margin-left:8px"></span>
+      </div>
+      <hr style="margin:12px 0;border:none;border-top:1px solid #e5e7eb">
+      <div class="frm-section">
+        <h4 style="color:#b91c1c">清理</h4>
+        <span class="hint">清除程序运行产生的本地文件：聊天记录、执行过程、用量统计、审计日志、快照。<br>保留：API 配置、插件（含自造插件）、长期记忆、技能。</span>
+        <button class="btn-no" style="margin-top:8px" onclick="cleanupHistory(this)">一键清除历史文件</button>
+        <span class="hint" id="cleanupResult" style="margin-left:8px"></span>
       </div>
     </div>
     <div class="m-foot">
@@ -976,7 +977,7 @@ $('fileInput').addEventListener('change', async () => {
     input.focus();
   }
 });
-$('innerInput').addEventListener('keydown', e => { if (e.key === 'Enter') innerSend(); });
+$('innerInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); innerSend(); } });
 $('outerInput').addEventListener('keydown', e => { if (e.key === 'Enter') outerSend(); });
 
 // ==================== 审批栏（底部） ====================
@@ -1094,13 +1095,14 @@ function profileRow(p = { name: '', base_url: '', api_key: '', model: '' }) {
   const div = document.createElement('div');
   div.className = 'profile-row';
   div.style.cssText = 'display:grid;grid-template-columns:70px 1fr 1fr 1fr 26px;gap:4px;margin:4px 0';
-  div.innerHTML = `<input placeholder="名称" value="${esc(p.name)}" data-k="name">
-    <input placeholder="base_url" value="${esc(p.base_url)}" data-k="base_url">
-    <input placeholder="api_key" type="password" value="${esc(p.api_key)}" data-k="api_key">
-    <input placeholder="model" value="${esc(p.model)}" data-k="model">
-    <button class="mini-btn" onclick="this.parentElement.remove()" title="删除此路">×</button>`;
-  return div;
-}
+   div.innerHTML = `<input placeholder="名称" value="${esc(p.name)}" data-k="name">
+     <input placeholder="base_url" value="${esc(p.base_url)}" data-k="base_url">
+     <input placeholder="api_key" type="password" value="${esc(p.api_key)}" data-k="api_key">
+     <input placeholder="model" value="${esc(p.model)}" data-k="model">
+     <button class="mini-btn" onclick="testProfileLlm(this)" title="用此路配置发一次最小请求验证连通">测</button>
+     <button class="mini-btn" onclick="this.parentElement.remove()" title="删除此路">×</button>`;
+   return div;
+ }
 function addProfileRow(p) { $('cfgProfiles').appendChild(profileRow(p)); }
 function openConfig() {
   api('/api/config').then(d => {
@@ -1163,14 +1165,11 @@ function startReview() {
 }
 async function dismissReview() { $('reviewTip').style.display = 'none'; await api('/api/review-ack', { method: 'POST' }); }
 
-// ==================== 首次运行向导 ====================
+// ==================== 首次运行向导（v1.3.1 起不再自动弹出，配置走右上角设置） ====================
 function wizRefresh() {
+  // 永不自动弹出：配置入口统一为右上角「设置」，向导仅在显式调用时展示
+  $('wizMask').classList.remove('show');
   if (!healthData) return;
-  const need = !healthData.mock && (!healthData.innerConfigured || !healthData.opencode);
-  const seen = localStorage.getItem('daWizDone') === '1';
-  $('wizMask').classList.toggle('show', need && !seen);
-  if (!need && !seen) { localStorage.setItem('daWizDone', '1'); }
-  if (healthData.mock) return; // 演示模式无需配置，保持步骤原文
   const mark = (numId, bodyId, ok, okText) => {
     $(numId).className = 'num ' + (ok ? 'ok' : 'bad');
     $(numId).textContent = ok ? '✓' : numId.slice(-1);
@@ -1253,16 +1252,9 @@ function initCollapsible() {
     const btn = el.querySelector('.col-head .toggle-btn');
     if (btn) btn.textContent = collapsed ? '◈' : '✕';
   });
-  // 恢复设置状态
-  const pluginEnabled = localStorage.getItem('da-plugin-panel-enabled') !== '0';
-  const outerEnabled = localStorage.getItem('da-outer-panel-enabled') !== '0';
+  // 恢复设置状态（面板开关已移除，仅存意图契约系统）
   const intentEnabled = localStorage.getItem('da-intent-system-enabled') !== '0';
-  if ($('settingPluginPanel')) $('settingPluginPanel').checked = pluginEnabled;
-  if ($('settingOuterPanel')) $('settingOuterPanel').checked = outerEnabled;
   if ($('settingIntentSystem')) $('settingIntentSystem').checked = intentEnabled;
-  // 根据设置控制面板可见性
-  if (!pluginEnabled) toggleCol('pluginCol');
-  if (!outerEnabled) toggleCol('outerCol');
 }
 
 // ==================== 设置面板控制 ====================
@@ -1305,6 +1297,56 @@ async function testEmbedding(btn) {
   }
 }
 
+// 内层 LLM 连通性测试：直接用表单当前值发最小请求（无需先保存）
+async function testInnerLlm(btn) {
+  const el = $('llmTestResult');
+  el.textContent = '测试中...';
+  btn.disabled = true;
+  try {
+    const d = await api('/api/llm/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base_url: $('cfgBase').value.trim(), api_key: $('cfgKey').value.trim(), model: $('cfgModel').value.trim() }) });
+    el.textContent = d.result || '无返回';
+  } catch (e) {
+    el.textContent = '测试失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 多路 API 单路测试：取所在行三个输入框的值
+async function testProfileLlm(btn) {
+  const row = btn.closest('.profile-row');
+  const get = k => { const i = row.querySelector(`input[data-k="${k}"]`); return i ? i.value.trim() : ''; };
+  const old = btn.textContent;
+  btn.textContent = '…';
+  btn.disabled = true;
+  try {
+    const d = await api('/api/llm/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ base_url: get('base_url'), api_key: get('api_key'), model: get('model') }) });
+    toast((d.ok ? '连通正常：' : '不通：') + (d.result || '').slice(0, 120));
+  } catch (e) {
+    toast('测试失败：' + e.message);
+  } finally {
+    btn.textContent = old;
+    btn.disabled = false;
+  }
+}
+
+// 一键清除历史文件（服务端清会话/过程/用量/审计/快照；保留配置、插件、记忆、技能）
+async function cleanupHistory(btn) {
+  if (!confirm('将清除：全部工作区的聊天记录、执行过程、用量统计、审计日志、快照。\n保留：API 配置、插件（含自造）、长期记忆、技能。\n确定清除？')) return;
+  const el = $('cleanupResult');
+  el.textContent = '清理中...';
+  btn.disabled = true;
+  try {
+    const d = await api('/api/cleanup', { method: 'POST' });
+    el.textContent = d.ok ? `已清除 ${d.removed} 项（释放 ${(d.bytes / 1024 / 1024).toFixed(1)}MB），${d.message}` : ('失败：' + (d.error || ''));
+    if (d.ok) { loadInnerHistory(); loadHealth(); }
+  } catch (e) {
+    el.textContent = '清理失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function saveSettings() {
   const profiles = [...$('cfgProfiles').querySelectorAll('.profile-row')].map(r => {
     const o = {};
@@ -1320,44 +1362,9 @@ function saveSettings() {
   }).catch(e => toast('保存失败：' + e.message));
 }
 
-function togglePluginPanel(enabled) {
-  localStorage.setItem('da-plugin-panel-enabled', enabled ? '1' : '0');
-  if (!enabled) {
-    const el = $('pluginCol');
-    if (!el.classList.contains('collapsed')) toggleCol('pluginCol');
-  } else {
-    const el = $('pluginCol');
-    if (el.classList.contains('collapsed')) toggleCol('pluginCol');
-  }
-}
-
-function toggleOuterPanel(enabled) {
-  localStorage.setItem('da-outer-panel-enabled', enabled ? '1' : '0');
-  if (!enabled) {
-    const el = $('outerCol');
-    if (!el.classList.contains('collapsed')) toggleCol('outerCol');
-  } else {
-    const el = $('outerCol');
-    if (el.classList.contains('collapsed')) toggleCol('outerCol');
-  }
-}
-
 function toggleIntentSystem(enabled) {
   localStorage.setItem('da-intent-system-enabled', enabled ? '1' : '0');
   toast(enabled ? '意图契约系统已启用' : '意图契约系统已禁用');
-}
-
-function addProfileRow(p) {
-  const div = document.createElement('div');
-  div.className = 'profile-row';
-  div.setAttribute('data-idx', p ? Object.keys(p).length : '');
-  div.innerHTML = `
-    <label>Profile ${p ? '' : ''}</label>
-    <input placeholder="Base URL" value="${p ? p.base_url || '' : ''}" class="profile-url">
-    <input placeholder="API Key" value="${p ? p.api_key || '' : ''}" class="profile-key" type="password">
-    <input placeholder="模型名" value="${p ? p.model || '' : ''}" class="profile-model">
-  `;
-  $('cfgProfiles').appendChild(div);
 }
 
 // 保留旧配置弹窗的兼容性
