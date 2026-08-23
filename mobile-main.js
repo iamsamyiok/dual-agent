@@ -4,13 +4,14 @@ const path = require('path');
 const fs = require('fs');
 
 const dataDir = process.argv[2] || path.join(__dirname, '.mobile-data');
-for (const d of [dataDir, path.join(dataDir, 'data'), path.join(dataDir, 'workspaces'), path.join(dataDir, 'plugins')]) {
+// 注意：不设 DUAL_AGENT_PLUGINS_DIR——插件必须随 nodejs-project/plugins（版本化内置目录）
+// 加载。曾把插件目录指向 dataDir/plugins（空目录），导致全部插件加载失败（真机实测踩坑）。
+for (const d of [dataDir, path.join(dataDir, 'data'), path.join(dataDir, 'workspaces')]) {
   fs.mkdirSync(d, { recursive: true });
 }
 
 process.env.DUAL_AGENT_DATA = path.join(dataDir, 'data');
 process.env.DUAL_AGENT_WS_ROOT = path.join(dataDir, 'workspaces');
-process.env.DUAL_AGENT_PLUGINS_DIR = path.join(dataDir, 'plugins');
 process.env.DUAL_AGENT_AUTOSTOP = '0';            // App 内生命周期由前台服务管理，禁用空闲自动退出
 process.env.DUAL_AGENT_MOBILE = '1';              // bash 插件据此启用 Android 适配层
 process.env.DUAL_AGENT_PORT = process.env.DUAL_AGENT_PORT || '3788';

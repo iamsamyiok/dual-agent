@@ -113,6 +113,25 @@ async function main() {
     assert.ok(out.includes('执行出错') && out.includes('未返回'), out);
     assert.ok(Date.now() - t0 < 3000, '超时未及时返回');
   });
+  await t('Hermes tool_call 文本兜底解析（真机 v1.2.0-alpha2 实测样例回归）', async () => {
+    const { parseHermesToolCalls } = require('../lib/inner.js');
+    // 真机实测：硅基流动 Qwen 系不走原生 tool_calls 通道，content 里吐残缺 Hermes 标记
+    const real = '<tool_call>\n<tool_call>\n<tool_call>\n<tool_call>search(query="惠州今天天气 2026年8月23日", language="zh")\n<tool_call>\n<tool_call>search(query="Hue weather forecast August 23 2026", language="en")\n<tool_call>';
+    let p = parseHermesToolCalls(real);
+    assert.strictEqual(p.calls.length, 2);
+    assert.deepStrictEqual(p.calls[0], { name: 'search', args: { query: '惠州今天天气 2026年8月23日', language: 'zh' } });
+    // 标准 Hermes JSON 块 + 前后普通文本保留
+    p = parseHermesToolCalls('我来查一下\n<tool_call>\n{"name": "bash", "arguments": {"command": "ls"}}\n</tool_call>\n');
+    assert.deepStrictEqual(p.calls, [{ name: 'bash', args: { command: 'ls' } }]);
+    assert.strictEqual(p.cleaned, '我来查一下');
+    // 无标记文本零误伤
+    p = parseHermesToolCalls('今天天气不错，适合出门。');
+    assert.strictEqual(p.calls.length, 0);
+    assert.strictEqual(p.cleaned, '今天天气不错，适合出门。');
+    // 截断 kwargs（无右括号）+ 类型推断（布尔/数字/引号内逗号）
+    p = parseHermesToolCalls('<tool_call>write(path="a.txt", content="x,y", overwrite=true, n=5');
+    assert.deepStrictEqual(p.calls, [{ name: 'write', args: { path: 'a.txt', content: 'x,y', overwrite: true, n: 5 } }]);
+  });
   await t('bash 插件 Android 适配层：toybox 重写与 not found 自纠提示（MOBILE 模拟）', async () => {
     // bash.js 的 MOBILE 开关在模块加载时冻结——用子进程带 env 隔离验证
     const cap = path.join(DATA_TMP, 'mobile-capability.json');
@@ -959,6 +978,39 @@ async function main() {
       assert.ok(!messages.some(m => String(m.content || '').includes('[意图契约]')), '落盘 messages 保持干净');
     } finally { globalThis.fetch = origFetch; }
   });
+  await t('inner.js Hermes 兜底 e2e：content 文本 tool_call 被解析执行（无原生 delta.tool_calls）', async () => {
+    const origFetch = globalThis.fetch;
+    const bodies = [];
+    const calls = [];
+    // 真机 v1.2.0-alpha2 实测形态：残缺空块 + python-kwargs 调用混在 content
+    const hermesContent = '<tool_call>\n<tool_call>\n<tool_call>search(query="惠州天气", language="zh")\n<tool_call>';
+    globalThis.fetch = async (u, init) => {
+      bodies.push(JSON.parse(init.body));
+      if (bodies.length === 1) return sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: hermesContent } }] }),
+        '[DONE]'
+      ]);
+      return sseResponse([JSON.stringify({ choices: [{ delta: { content: '查到了结果' } }] }), '[DONE]']);
+    };
+    try {
+      const events = [];
+      const messages = [{ role: 'user', content: '查天气' }];
+      const out = await chatInnerReal({ base_url: 'http://x.test', api_key: 'k', model: 'm' }, messages, [],
+        async (name, args) => { calls.push({ name, args }); return '搜索结果：晴 30 度'; },
+        e => events.push(e));
+      assert.equal(out, '查到了结果', '第二轮文本为最终回复');
+      assert.equal(calls.length, 1, 'Hermes 文本调用被执行一次');
+      assert.deepEqual(calls[0], { name: 'search', args: { query: '惠州天气', language: 'zh' } });
+      // 落盘协议配对：assistant 带 tool_calls + tool 结果跟在其后（OpenAI 协议）
+      const asst = messages.find(m => m.role === 'assistant' && m.tool_calls);
+      assert.ok(asst, '存在 tool_calls 宿主 assistant');
+      assert.equal(asst.tool_calls[0].function.name, 'search');
+      assert.ok(messages.some(m => m.role === 'tool'), 'tool 结果已入史');
+      // 工具事件流可见
+      assert.ok(events.some(e => e.type === 'tool_call' && e.plugin === 'search'), 'tool_call 事件');
+    } finally { globalThis.fetch = origFetch; }
+  });
+
   await t('静态接线：server 意图闭环三段（抽取 / 注记 / 核验返修，v0.9.24 解耦为插件）', () => {
     const srv = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
     assert.ok(/intentNote,/.test(srv), 'intentNote 传入 chatInner 每轮注记');
