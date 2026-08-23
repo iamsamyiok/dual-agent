@@ -292,6 +292,21 @@ node test/smoke.js
 | DUAL_AGENT_OPENCODE_CMD | 显式指定 opencode 完整路径（Windows 检测失效时使用） |
 | DUAL_AGENT_PLUGIN_TIMEOUT_MS | 单次插件执行兜底超时（默认 60000） |
 | DUAL_AGENT_DATA / DUAL_AGENT_PLUGINS_DIR / DUAL_AGENT_WS_ROOT | 数据/插件/工作区目录覆盖（测试隔离用） |
+| DUAL_AGENT_AUTOSTOP=0 | 禁用空闲自动退出（常驻；Android 壳内固定启用） |
+| DUAL_AGENT_MOBILE=1 | Android 模式：bash 插件启用 toybox 适配层（命令重写 + 能力探测 + 自纠提示） |
+
+## Android 版
+
+`android/` 目录是安卓 App 工程：Kotlin 壳 + nodejs-mobile（Node 18.20.4）内嵌运行完整服务端，WebView 直连 `127.0.0.1:3788` 复用网页界面；前台服务（dataSync）保证长任务在后台存活。
+
+```bash
+# 构建（需 JDK 17 + Android SDK 34 + NDK 26 + nodejs-mobile 发行包）
+./android/copy-assets.sh <nodejs-mobile解压目录>   # 同步工程文件与 libnode.so 到 assets
+cd android && gradle assembleDebug                  # 产物 app/build/outputs/apk/debug/
+```
+
+移动端要点：`mobile-main.js` 为壳入口（数据目录重定向到 App 私有目录、AUTOSTOP=0、PATH 探测 Termux/toybox）；bash 插件在 `DUAL_AGENT_MOBILE=1` 时自动适配 toybox 环境（`grep -P`→`-E` 等重写、缺命令时注入可用清单让模型自纠）；libnode.so 放 assets 运行期释放加载（规避 16KB 页对齐阻断）。
+
 
 Windows 注意：npm 全局安装的 opencode 是 `.cmd` 垫片，程序会自动从 `where` 结果中优先选择可执行垫片并以 shell 方式启动；若仍失败，用 `DUAL_AGENT_OPENCODE_CMD` 指定完整路径。bash 插件在 Windows 下自动先切 UTF-8 代码页（`chcp 65001`）防中文乱码。
 

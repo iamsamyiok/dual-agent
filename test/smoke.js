@@ -113,6 +113,33 @@ async function main() {
     assert.ok(out.includes('执行出错') && out.includes('未返回'), out);
     assert.ok(Date.now() - t0 < 3000, '超时未及时返回');
   });
+  await t('bash 插件 Android 适配层：toybox 重写与 not found 自纠提示（MOBILE 模拟）', async () => {
+    // bash.js 的 MOBILE 开关在模块加载时冻结——用子进程带 env 隔离验证
+    const cap = path.join(DATA_TMP, 'mobile-capability.json');
+    fs.rmSync(cap, { force: true });
+    const script = `
+      const bash = require(${JSON.stringify(path.join(__dirname, '..', 'plugins', 'bash.js'))});
+      (async () => {
+        const r = await bash.run({ command: "printf 'a1\\\\nb2\\\\n' | grep -E '[0-9]'" }, { cwd: ${JSON.stringify(TMP)} });
+        if (!(r.includes('退出码 0') && r.includes('a1'))) throw new Error('basic: ' + r);
+        const r2 = await bash.run({ command: 'definitely_missing_cmd_xyz' }, { cwd: ${JSON.stringify(TMP)} });
+        if (!r2.includes('[Android 环境提示]') || !/可用命令：/.test(r2)) throw new Error('hint: ' + r2);
+        const r3 = await bash.run({ command: 'echo desktop-ok' }, { cwd: ${JSON.stringify(TMP)} });
+        if (!r3.includes('desktop-ok') || r3.includes('环境提示')) throw new Error('noise: ' + r3);
+        if (!require('fs').existsSync(${JSON.stringify(cap)})) throw new Error('能力缓存未落盘');
+        console.log('MOBILE_OK');
+      })().catch(e => { console.error(e.message); process.exit(1); });
+    `;
+    const out = await new Promise((resolve) => {
+      const p = require('child_process').spawn(process.execPath, ['-e', script],
+        { env: { ...process.env, DUAL_AGENT_MOBILE: '1', DUAL_AGENT_DATA: DATA_TMP }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let s = '';
+      p.stdout.on('data', d => s += d); p.stderr.on('data', d => s += d);
+      p.on('close', c => resolve({ c, s }));
+    });
+    assert.strictEqual(out.c, 0, out.s);
+    assert.ok(out.s.includes('MOBILE_OK'), out.s);
+  });
   const WS = path.join(TMP, 'ws');
   fs.mkdirSync(WS, { recursive: true });
   const ctx = { cwd: WS, dataDir: DATA_TMP };
